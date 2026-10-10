@@ -30,12 +30,14 @@ class PostgresIntegrationTests(unittest.TestCase):
         cls.env=dict(os.environ,PGHOST='127.0.0.1',PGPORT='5432',PGUSER='postgres',
                      PGPASSWORD='migration-test-only',PGDATABASE='postgres',PGSSLMODE='disable')
         admin=Database(cls.env)
+        admin.sql('CREATE ROLE supabase_auth_admin;')
         cls.dbs=[]
         for name in ('migration_fixture_source','migration_fixture_target'):
             admin.sql('CREATE DATABASE '+name+';')
             cls.dbs.append(Database(dict(cls.env,PGDATABASE=name)))
         fixture='''
         CREATE SCHEMA auth;
+        ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth GRANT SELECT ON TABLES TO postgres;
         CREATE TABLE auth.schema_migrations(version text PRIMARY KEY);
         INSERT INTO auth.schema_migrations VALUES ('20260101');
         CREATE TABLE auth.users(id uuid PRIMARY KEY,email text);
@@ -89,6 +91,7 @@ class PostgresIntegrationTests(unittest.TestCase):
             with self.source.consistent_snapshot():
                 inv=self.source.inventory()
                 self.source.dump(folder,inv)
+            self.assertNotIn('supabase_auth_admin',(folder/'managed.list').read_text())
             self.target.restore(folder,old,inv)
             actual=self.target.inventory()
             self.assertEqual(inv['checksums'],self.target.checksums(inv))
@@ -97,6 +100,7 @@ class PostgresIntegrationTests(unittest.TestCase):
             self.assertEqual(actual['policies'],inv['policies'])
             self.assertEqual(actual['application_policies'],inv['application_policies'])
             self.assertEqual(actual['sql_functions'],inv['sql_functions'])
+            self.assertEqual(actual['managed_default_acl'],inv['managed_default_acl'])
             self.assertEqual(self.target.sql("SELECT count(*) FROM pg_publication WHERE pubname='supabase_realtime_messages_publication';"),'1')
             self.assertEqual(self.target.sql("SELECT to_regclass('realtime.target_only') IS NOT NULL;"),'t')
             self.assertEqual(self.target.sql("SELECT public.normalize('Olá');"),'Ola')

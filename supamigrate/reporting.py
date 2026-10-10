@@ -77,6 +77,8 @@ def feature_maps(obs):
         for item in inv.get(key, []):
             identity = tuple(item.get(f, '') for f in ('schema','table','name','schemaname','tablename','policyname'))
             maps['rls_functions'][key + ':' + _name(*identity)] = item
+    for item in inv.get('managed_default_acl',[]):
+        maps['rls_functions']['platform_default_acl:'+_name(item['role'],item['schema'],item['kind'])]=item
     for item in app.get('publications', []):
         maps['realtime']['publication:' + item['name']] = item
     for item in app.get('publication_tables', []):

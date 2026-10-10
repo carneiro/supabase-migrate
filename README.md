@@ -59,7 +59,7 @@ A estimativa é uma faixa heurística, não um SLA: considera tamanho do banco, 
 | Schemas de aplicação, tabelas, dados, índices, views, sequences, tipos, SQL functions, triggers, grants e RLS | Dump/restore nativo, incluindo owners, sem `--no-owner`. Schemas gerenciados não são apagados. |
 | Histórico CLI `supabase_migrations` | Incluído no dump de aplicação. |
 | Auth | Dados das tabelas, incluindo usuários, UUIDs e hashes de senha; schema gerenciado mantido. Versões/tabelas incompatíveis bloqueiam. |
-| Customizações auth/storage | Policies, triggers, ACLs e flags RLS; funções e tabelas customizadas nesses schemas bloqueiam. |
+| Customizações auth/storage | Policies, triggers, ACLs e flags RLS; funções e tabelas customizadas nesses schemas bloqueiam. Privilégios padrão das roles `supabase_*` são preservados e precisam coincidir entre projetos. |
 | Realtime | Publicações da aplicação, associação de tabelas e configuração exposta pela Management API. Publicações internas `supabase_realtime_*` e partições gerenciadas permanecem no destino; `supabase_realtime` é migrada. Conexões/mensagens transitórias não são copiadas. |
 | Storage padrão | Buckets, bytes dos objetos, IDs, `owner`, `owner_id`, timestamps e `user_metadata`; preserva versão física/ETag criados no destino. Valida bytes por SHA-256. |
 | Edge Functions | Download e deploy via CLI, preservando `verify_jwt` e nome. Exige `index.ts` e bundle sem import map declarado. Dependências não recuperáveis bloqueiam antes da limpeza. |

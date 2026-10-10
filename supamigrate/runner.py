@@ -72,6 +72,8 @@ def blockers(source, target, src_service, dst_service):
         errors.append('Versões internas Auth/Storage diferentes; aguarde/alinha atualizações da plataforma.')
     if managed_tables(source) != managed_tables(target):
         errors.append('Estruturas auth/storage incompatíveis; alinhe versões e customizações antes de continuar.')
+    if source.get('managed_default_acl') != target.get('managed_default_acl'):
+        errors.append('Privilégios padrão de roles gerenciadas Auth/Storage divergem; não são regravados pelo operador postgres.')
     try:
         role_statements(source, target)
     except MigrationError as e:
@@ -140,7 +142,7 @@ def verify(project, db, inventory, services, folder):
         current = db.inventory()
         expected_scope, actual_scope = application_inventory(inventory), application_inventory(current)
         for key in ('schemas','tables','policies','triggers','publications','publication_tables',
-                    'application_policies','application_triggers','sql_functions','views','indexes','constraints','sequences'):
+                    'application_policies','application_triggers','sql_functions','views','indexes','constraints','sequences','managed_default_acl'):
             if actual_scope.get(key) != expected_scope.get(key):
                 raise MigrationError('Verificação de schema falhou: ' + key)
         current['checksums'] = db.checksums(inventory)

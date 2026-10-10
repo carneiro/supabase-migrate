@@ -123,7 +123,7 @@ class Database:
         data = {}
         data['version'] = int(self.sql('SHOW server_version_num;'))
         data['bytes'] = int(self.sql('SELECT pg_database_size(current_database());'))
-        data['schemas'] = self.rows("SELECT nspname AS name FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY 1")
+        data['schemas'] = self.rows("SELECT nspname AS name,pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY 1")
         data['extensions'] = self.rows('SELECT extname AS name, extversion AS version FROM pg_extension ORDER BY 1')
         data['roles'] = self.rows("SELECT rolname AS name, rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolcanlogin, rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil::text, rolconfig FROM pg_roles ORDER BY 1")
         data['memberships'] = self.rows('SELECT r.rolname AS role, m.rolname AS member, a.admin_option FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles m ON m.oid=a.member ORDER BY 1,2')
@@ -163,6 +163,10 @@ class Database:
             WHERE n.nspname IN ('auth','storage') AND r.rolname NOT LIKE 'supabase_%'
             AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass
             AND d.objid=p.oid AND d.deptype='e') ORDER BY 1,2""")
+        data['managed_default_acl'] = self.rows("""SELECT r.rolname AS role,n.nspname AS schema,
+            d.defaclobjtype AS kind,d.defaclacl::text AS acl FROM pg_default_acl d
+            JOIN pg_roles r ON r.oid=d.defaclrole JOIN pg_namespace n ON n.oid=d.defaclnamespace
+            WHERE n.nspname IN ('auth','storage') AND r.rolname LIKE 'supabase_%' ORDER BY 1,2,3""")
         app_filter = "n.nspname NOT IN (" + ','.join(ql(x) for x in sorted(MANAGED)) + ") AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
         data['sql_functions'] = self.rows("""SELECT n.nspname AS schema,p.proname AS name,
             pg_get_function_identity_arguments(p.oid) AS identity,md5(pg_get_functiondef(p.oid)) AS definition_hash,
@@ -212,7 +216,8 @@ class Database:
             managed += ['--snapshot=' + self.snapshot]
         run(managed + ['--file=' + str(folder/'managed.dump')], env=self.env)
         toc = run(['pg_restore','--list',str(folder/'managed.dump')], env=self.env).decode()
-        selected = [line for line in toc.splitlines() if re.match(r'^\d+; \d+ \d+ (ACL|DEFAULT ACL) ', line)]
+        selected = [line for line in toc.splitlines() if re.match(r'^\d+; \d+ \d+ (ACL|DEFAULT ACL) ', line)
+                    and not (' DEFAULT ACL ' in line and line.split()[-1].startswith('supabase_'))]
         (folder/'managed.list').write_text('\n'.join(selected)+'\n')
         run(['pg_restore','--use-list='+str(folder/'managed.list'),'--file='+str(folder/'managed.sql'),
              str(folder/'managed.dump')], env=self.env)
@@ -224,6 +229,17 @@ class Database:
             run(['pg_restore','--use-list='+str(folder/'database.list'),'--section='+section,
                  '--file='+str(folder/('database-'+section+'.sql')),'--no-comments',
                  str(folder/'database.dump')],env=self.env)
+        # pg_dump omits CREATE SCHEMA public when it matches the initdb schema.
+        # Our transactional cleanup drops it, so supply the initial definition
+        # before extension/table DDL. Any dumped ACL changes are replayed later.
+        if not re.search(r'^\d+; \d+ \d+ SCHEMA - public ',toc,re.M):
+            public=next((s for s in inventory['schemas'] if s['name']=='public'),None)
+            if public:
+                path=folder/'database-pre-data.sql'
+                privileges='USAGE' if inventory['version'] >= 150000 else 'USAGE, CREATE'
+                prefix='CREATE SCHEMA "public" AUTHORIZATION '+qi(public['owner'])+';\n'
+                prefix+='GRANT '+privileges+' ON SCHEMA "public" TO PUBLIC;\n'
+                path.write_text(prefix+path.read_text(),encoding='utf8')
         run(['pg_restore','--file='+str(folder/'auth.sql'),'--no-comments',str(folder/'auth.dump')],env=self.env)
         inventory['checksums'] = self.checksums(inventory)
         inventory['row_counts'] = dict(self.last_row_counts)

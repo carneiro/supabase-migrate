@@ -54,6 +54,8 @@ def capture_storage(project, inventory, folder):
         if expected is not None and local.stat().st_size != int(expected):
             raise MigrationError('Objeto Storage mudou durante captura; destino permanece intacto.')
         manifest.append({'file': local.name, 'sha256': sha, 'object': obj})
+        if (index+1)%100==0 or index+1==len(inventory['objects']):
+            print(f"Storage capturado: {index+1}/{len(inventory['objects'])}",flush=True)
     write_json(folder.parent / 'objects.json', manifest)
     return manifest
 
@@ -73,7 +75,7 @@ def restore_storage(project, db, inventory, folder):
         body = {k: b[k] for k in ('id','name','public','file_size_limit','allowed_mime_types') if k in b}
         project.storage.request('POST', '/bucket', body)
     manifest = json.loads((folder/'objects.json').read_text())
-    for item in manifest:
+    for index,item in enumerate(manifest,1):
         obj = item['object']
         path = folder/'objects'/item['file']
         if digest(path) != item['sha256']:
@@ -91,6 +93,8 @@ def restore_storage(project, db, inventory, folder):
             assignments.append(qi(key) + '=' + encoded)
         # Platform update triggers otherwise replace the captured updated_at.
         db.sql('BEGIN; SET LOCAL session_replication_role=replica; UPDATE storage.objects SET ' + ','.join(assignments) + ' WHERE bucket_id=' + ql(obj['bucket_id']) + ' AND name=' + ql(obj['name']) + '; COMMIT;')
+        if index%100==0 or index==len(manifest):
+            print(f'Storage restaurado: {index}/{len(manifest)}',flush=True)
     for b in inventory['buckets']:
         fields = [k for k in ('owner','owner_id','created_at','updated_at') if k in b]
         if fields:
@@ -117,12 +121,18 @@ def verify_storage(project, db, inventory, folder):
         for field in ('id','owner','owner_id','user_metadata','created_at','updated_at'):
             if obj.get(field) != actual[key].get(field):
                 raise MigrationError('Verificação Storage: identidade/owner/metadados diferentes.')
+        metadata=obj.get('metadata') or {}
+        for field in ('size','mimetype','cacheControl'):
+            if field in metadata and metadata[field]!=(actual[key].get('metadata') or {}).get(field):
+                raise MigrationError('Verificação Storage: tamanho/MIME/cache diferentes.')
     check = Path(folder)/'verify-object.tmp'
     try:
-        for item in manifest:
+        for index,item in enumerate(manifest,1):
             sha = project.storage.request('GET', object_path(item['object']).replace('/object/', '/object/authenticated/', 1), download=check)
             if sha != item['sha256']:
                 raise MigrationError('Verificação Storage: conteúdo do arquivo divergente.')
+            if index%100==0 or index==len(manifest):
+                print(f'Storage verificado: {index}/{len(manifest)}',flush=True)
     finally:
         check.unlink(missing_ok=True)
 

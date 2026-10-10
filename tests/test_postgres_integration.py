@@ -150,7 +150,7 @@ class PostgresIntegrationTests(unittest.TestCase):
                 if method=='POST' and path=='/bucket':
                     self.target.sql("INSERT INTO storage.buckets(id,name,public) VALUES('b','b',false);")
                 elif method=='POST':
-                    self.target.sql("INSERT INTO storage.objects(id,bucket_id,name) VALUES('33333333-3333-3333-3333-333333333333','b','file.txt');")
+                    self.target.sql("INSERT INTO storage.objects(id,bucket_id,name,metadata) VALUES('33333333-3333-3333-3333-333333333333','b','file.txt','{\"size\":4,\"mimetype\":\"text/plain\"}');")
                 elif method=='GET':
                     return sha
             project.storage.request.side_effect=api

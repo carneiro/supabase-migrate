@@ -27,6 +27,7 @@ class OrchestrationTests(unittest.TestCase):
             stack.enter_context(patch('supamigrate.runner.Project'))
             stack.enter_context(patch('supamigrate.runner.inspect_services',side_effect=lambda project:services()))
             stack.enter_context(patch('supamigrate.runner.check_manifest'))
+            stack.enter_context(patch('supamigrate.runner.capture_assets'))
             stack.enter_context(patch('builtins.input',return_value='MIGRAR '+TARGET if confirm else 'no'))
             stack.enter_context(patch('sys.stdout',new=io.StringIO()))
             stack.enter_context(patch('sys.stderr',new=io.StringIO()))

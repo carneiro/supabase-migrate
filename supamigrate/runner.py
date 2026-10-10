@@ -15,7 +15,8 @@ import sys
 import uuid
 
 from .core import MigrationError, Project, digest, run, validate_refs, write_json
-from .database import Database, MANAGED, connection_env, custom_role, role_statements
+from .database import Database, MANAGED, application_inventory, connection_env, custom_role, role_statements
+from .reporting import finish_report, observation, now
 from .services import (capture_functions, capture_storage, clear_functions, clear_storage,
                        inspect_services, masked, restore_configs, restore_functions,
                        restore_storage, verify_services, verify_storage)
@@ -87,7 +88,7 @@ def blockers(source, target, src_service, dst_service):
 
 def stable_inventory(inv):
     # GET object may update access telemetry; it is not evidence of content drift.
-    result = {k:v for k,v in inv.items() if k not in ('checksums','managed_functions','bytes')}
+    result = {k:v for k,v in application_inventory(inv).items() if k not in ('checksums','row_counts','bytes')}
     result['objects'] = [{k:v for k,v in o.items() if k != 'last_accessed_at'} for o in inv['objects']]
     return result
 
@@ -121,23 +122,34 @@ def check_manifest(folder):
 
 def capture(project, db, inventory, services, folder, token):
     folder.mkdir()
-    print('Capturando banco, arquivos e funções de', project.ref, flush=True)
+    print('Capturando snapshot do banco de', project.ref, flush=True)
     db.dump(folder, inventory)
+    write_json(folder/'services.json', services)
+
+
+def capture_assets(project, inventory, services, folder, token):
+    print('Capturando arquivos e funções de', project.ref, flush=True)
     capture_storage(project, inventory, folder)
     capture_functions(project, services, folder, token)
-    write_json(folder/'services.json', services)
     save_manifest(folder)
 
 
 def verify(project, db, inventory, services, folder):
-    current = db.inventory()
-    for key in ('schemas','tables','policies','triggers','publications','publication_tables'):
-        if current.get(key) != inventory.get(key):
-            raise MigrationError('Verificação de schema falhou: ' + key)
-    if db.checksums(inventory) != inventory['checksums']:
-        raise MigrationError('Checksum das tabelas do banco diverge do snapshot.')
+    started = now()
+    with db.consistent_snapshot():
+        current = db.inventory()
+        expected_scope, actual_scope = application_inventory(inventory), application_inventory(current)
+        for key in ('schemas','tables','policies','triggers','publications','publication_tables',
+                    'application_policies','application_triggers','sql_functions','views','indexes','constraints','sequences'):
+            if actual_scope.get(key) != expected_scope.get(key):
+                raise MigrationError('Verificação de schema falhou: ' + key)
+        current['checksums'] = db.checksums(inventory)
+        current['row_counts'] = dict(getattr(db,'last_row_counts',{}))
+        if current['checksums'] != inventory['checksums']:
+            raise MigrationError('Checksum das tabelas do banco diverge do snapshot.')
     verify_storage(project, db, inventory, folder)
-    verify_services(project, services)
+    actual_services = verify_services(project, services)
+    return observation(current,actual_services,started=started)
 
 
 def replace(project, db, previous, incoming, previous_services, incoming_services, folder, token, checkpoint):
@@ -155,7 +167,7 @@ def replace(project, db, previous, incoming, previous_services, incoming_service
     checkpoint('restoring_functions')
     restore_functions(project, incoming_services, folder, token)
     checkpoint('verifying')
-    verify(project, db, incoming, incoming_services, folder)
+    return verify(project, db, incoming, incoming_services, folder)
 
 
 def recover(project, db, folder, token, checkpoint):
@@ -172,6 +184,7 @@ def parser():
     p.add_argument('--source', help='Project ref de origem (perguntado quando omitido).')
     p.add_argument('--target', help='Project ref de destino (perguntado quando omitido).')
     p.add_argument('--plan', action='store_true', help='Somente inventário/estimativa; sem dumps ou alterações remotas.')
+    p.add_argument('--diff', action='store_true', help='Compara estados atuais (inclui checksums), sem migrar.')
     p.add_argument('--require-atomic', action='store_true', help='Recusa migração: atomicidade global não existe no Supabase.')
     p.add_argument('--work-dir', type=Path, default=Path('.migrate'), help='Diretório privado de backups e relatórios.')
     p.add_argument('--recover', type=Path, metavar='RUN_DIR', help='Recupera o destino usando backup de uma execução anterior.')
@@ -190,25 +203,26 @@ def credentials(source, target):
     return token, Database(connection_env(src_url,source),source=True) if source else None, Database(connection_env(dst_url,target))
 
 
-def dependencies():
-    for command in ('psql','pg_dump','pg_restore','supabase'):
+def dependencies(*, readonly=False):
+    for command in (('psql',) if readonly else ('psql','pg_dump','pg_restore','supabase')):
         if not shutil.which(command):
             raise MigrationError('Dependência ausente: ' + command + '. Consulte README.md.')
+    if readonly:
+        return
     for command in ('download','deploy'):
         help_text = run(['supabase','functions',command,'--help']).decode()
         if '--use-api' not in help_text or '--project-ref' not in help_text:
             raise MigrationError('Atualize Supabase CLI: functions download/deploy --use-api é necessário.')
 
 
-def main(argv=None):
-    args = parser().parse_args(argv)
+def execute(args, context):
     if args.require_atomic:
         raise MigrationError('Atomicidade global indisponível: nenhuma alteração realizada. Use um cutover externo para esse requisito.')
     if args.throughput_mib <= 0 or not math.isfinite(args.throughput_mib):
         raise MigrationError('--throughput-mib deve ser positivo e finito.')
-    if not sys.stdin.isatty() and not args.plan:
+    if not sys.stdin.isatty() and not (args.plan or args.diff):
         raise MigrationError('Execução destrutiva exige terminal interativo e confirmação do ID do destino.')
-    dependencies()
+    dependencies(readonly=args.plan or args.diff)
     os.umask(0o077)
     if args.recover:
         recover_dir = args.recover.resolve()
@@ -231,7 +245,8 @@ def main(argv=None):
         dst = Project(target, token)
         dst.connect()
         # Detect insufficient DB restore privileges before destructive operations.
-        dst_db.sql('BEGIN; SET LOCAL session_replication_role = replica; ROLLBACK;')
+        if not (args.plan or args.diff):
+            dst_db.sql('BEGIN; SET LOCAL session_replication_role = replica; ROLLBACK;')
         if args.recover:
             if input('Para recuperar o backup, digite RECUPERAR ' + target + ': ') != 'RECUPERAR ' + target:
                 raise MigrationError('Recuperação cancelada.')
@@ -245,6 +260,8 @@ def main(argv=None):
         run_dir = work/(datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex[:8])
         run_dir.mkdir()
         state = {'source':source,'target':target,'phase':'inventory','global_atomic':False}
+        context.update(run_dir=run_dir,state=state,source_db=src_db,target_db=dst_db,
+                       source_project=src,target_project=dst,report_data=not args.plan,observations={})
         def checkpoint(phase):
             state['phase']=phase
             write_json(run_dir/'state.json',state)
@@ -253,8 +270,11 @@ def main(argv=None):
         with ExitStack() as stack:
             stack.enter_context(src_db.consistent_snapshot())
             stack.enter_context(dst_db.consistent_snapshot())
+            observed_at=now()
             source_inv,target_inv = src_db.inventory(),dst_db.inventory()
             src_service,dst_service = inspect_services(src),inspect_services(dst)
+            context['observations']['source_snapshot']=observation(source_inv,src_service,started=observed_at)
+            context['observations']['target_before']=observation(target_inv,dst_service,started=observed_at)
             problems = blockers(source_inv,target_inv,src_service,dst_service)
             timing = estimate(source_inv,target_inv,src_service,args.throughput_mib)
             report = {'source':source,'target':target,'estimate':timing,'limitations':LIMITATIONS,
@@ -269,7 +289,11 @@ def main(argv=None):
             print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)
             print(f"Estimativa: {timing['min_minutes']}–{timing['max_minutes']} minutos; depende de rede, quotas e volume.")
             print('Escopo: schemas/dados, Auth, RLS, funções SQL, publicações/config Realtime, Edge Functions, Storage e owners.')
+            if args.diff:
+                checkpoint('compared_only')
+                return 0
             if problems:
+                checkpoint('blocked')
                 raise MigrationError('Preflight bloqueou a migração. Consulte os blockers do relatório; destino intacto.')
             if args.plan:
                 checkpoint('planned')
@@ -289,6 +313,8 @@ def main(argv=None):
             problems = blockers(source_inv,target_inv,src_service,dst_service)
             if problems:
                 raise MigrationError('; '.join(problems))
+        capture_assets(dst,target_inv,dst_service,run_dir/'target',token)
+        capture_assets(src,source_inv,src_service,run_dir/'source',token)
         # Check that Storage membership/versions and target content did not change
         # while binaries were captured; the origin remains online throughout.
         checkpoint('recheck')
@@ -304,7 +330,9 @@ def main(argv=None):
         check_manifest(run_dir/'source')
         check_manifest(run_dir/'target')
         try:
-            replace(dst,dst_db,target_inv,source_inv,dst_service,src_service,run_dir/'source',token,checkpoint)
+            verified = replace(dst,dst_db,target_inv,source_inv,dst_service,src_service,run_dir/'source',token,checkpoint)
+            if isinstance(verified,dict):
+                context['observations']['target_verified']=verified
         except (Exception, KeyboardInterrupt):
             checkpoint('recovering')
             # Do not interrupt recovery again with Ctrl-C. SIGKILL still needs --recover.
@@ -326,3 +354,32 @@ def main(argv=None):
         print('Backups privados e relatório:',run_dir)
         print('Revise callbacks/URLs e secrets antes de direcionar clientes ao destino.')
         return 0
+
+
+def main(argv=None):
+    args=parser().parse_args(argv)
+    if sum(bool(x) for x in (args.plan,args.diff,args.recover)) > 1:
+        raise MigrationError('Escolha apenas um modo: --plan, --diff ou --recover.')
+    context={}
+    result=1
+    try:
+        result=execute(args,context)
+    except BaseException:
+        if context:
+            state=context['state']
+            if state['phase'] not in ('failed_recovered','recovery_failed','blocked'):
+                state['failed_at']=state['phase']
+                state['phase']='failed_before_migration'
+                write_json(Path(context['run_dir'])/'state.json',state)
+        raise
+    finally:
+        if context:
+            try:
+                report=finish_report(context)
+                if report['errors'] and result==0:
+                    result=2
+            except (Exception,KeyboardInterrupt):
+                print('Não foi possível concluir o relatório; backups e estado da migração foram preservados.',file=sys.stderr)
+                if result==0:
+                    result=2
+    return result

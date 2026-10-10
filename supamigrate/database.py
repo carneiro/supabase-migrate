@@ -26,6 +26,27 @@ def custom_role(name):
     return not (name in BUILTIN_ROLES or name.startswith(('pg_', 'supabase_')))
 
 
+def application_inventory(inv):
+    """Project-owned scope, excluding continuously managed Realtime internals."""
+    result = dict(inv)
+    result['tables'] = [t for t in inv.get('tables',[]) if t['schema'] not in MANAGED or t['schema'] in ('auth','storage')]
+    result['schemas'] = [s for s in inv.get('schemas',[]) if s['name'] not in MANAGED]
+    result['publications'] = [p for p in inv.get('publications',[]) if not p['name'].startswith('supabase_realtime_')]
+    result['publication_tables'] = [p for p in inv.get('publication_tables',[]) if not p['pubname'].startswith('supabase_realtime_')]
+    return result
+
+
+def portable_toc(toc):
+    lines = []
+    for line in toc.splitlines():
+        if re.match(r'^\d+; \d+ \d+ (EVENT TRIGGER|DEFAULT ACL) ', line) and line.endswith(' supabase_admin'):
+            continue
+        if re.match(r'^\d+; \d+ \d+ PUBLICATION(?: TABLE| TABLES IN SCHEMA)? ', line) and 'supabase_realtime_' in line:
+            continue
+        lines.append(line)
+    return '\n'.join(lines) + '\n'
+
+
 def connection_env(url, ref):
     u = urlparse(url)
     query = parse_qs(u.query)
@@ -51,9 +72,9 @@ class Database:
         self.env = dict(env)
         self.source = source
         self.snapshot = None
-        self.env['PGOPTIONS'] = '-c standard_conforming_strings=on -c timezone=UTC -c extra_float_digits=3'
+        self.env['PGOPTIONS'] = '-c standard_conforming_strings=on -c timezone=UTC -c extra_float_digits=3 -c lock_timeout=3000 -c statement_timeout=120000'
         if source:
-            self.env['PGOPTIONS'] += ' -c default_transaction_read_only=on -c statement_timeout=0'
+            self.env['PGOPTIONS'] += ' -c default_transaction_read_only=on'
 
     def sql(self, sql):
         prefix = ''
@@ -120,8 +141,8 @@ class Database:
             AND n.nspname IN ('auth','storage') ORDER BY 1,2,3""")
         data['publications'] = self.rows("SELECT pubname AS name, puballtables, pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication ORDER BY 1")
         data['publication_tables'] = self.rows('SELECT pubname,schemaname,tablename,attnames,rowfilter FROM pg_publication_tables ORDER BY 1,2,3')
-        data['auth_versions'] = self.rows('SELECT * FROM auth.schema_migrations ORDER BY version')
-        data['storage_versions'] = self.rows('SELECT * FROM storage.migrations ORDER BY id')
+        data['auth_versions'] = self.rows('SELECT version FROM auth.schema_migrations ORDER BY version')
+        data['storage_versions'] = self.rows('SELECT id,name,hash FROM storage.migrations ORDER BY id')
         data['foreign_servers'] = self.rows('SELECT srvname AS name FROM pg_foreign_server')
         data['large_objects'] = int(self.sql('SELECT count(*) FROM pg_largeobject_metadata;'))
         data['custom_managed_tables'] = self.rows("""SELECT n.nspname AS schema,c.relname AS name FROM pg_class c
@@ -137,6 +158,39 @@ class Database:
             if self.sql('SELECT to_regclass(' + ql(table) + ') IS NOT NULL;') == 't':
                 data[table] = int(self.sql('SELECT count(*) FROM ' + '.'.join(map(qi, table.split('.'))) + ';'))
         data['cron'] = self.rows('SELECT * FROM cron.job ORDER BY jobid') if data.get('cron.job') else []
+        data['managed_functions'] = self.rows("""SELECT n.nspname AS schema,p.proname AS name FROM pg_proc p
+            JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
+            WHERE n.nspname IN ('auth','storage') AND r.rolname NOT LIKE 'supabase_%'
+            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass
+            AND d.objid=p.oid AND d.deptype='e') ORDER BY 1,2""")
+        app_filter = "n.nspname NOT IN (" + ','.join(ql(x) for x in sorted(MANAGED)) + ") AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
+        data['sql_functions'] = self.rows("""SELECT n.nspname AS schema,p.proname AS name,
+            pg_get_function_identity_arguments(p.oid) AS identity,md5(pg_get_functiondef(p.oid)) AS definition_hash,
+            pg_get_userbyid(p.proowner) AS owner,p.prosecdef AS security_definer,
+            p.proacl::text AS acl FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE p.prokind IN ('f','p') AND """ + app_filter + ' ORDER BY 1,2,3')
+        data['application_policies'] = self.rows("""SELECT p.schemaname AS schema,p.tablename AS table,p.policyname AS name,
+            p.permissive,p.roles,p.cmd,md5(coalesce(p.qual,'')||'|'||coalesce(p.with_check,'')) AS expression_hash
+            FROM pg_policies p JOIN pg_namespace n ON n.nspname=p.schemaname WHERE """ + app_filter + ' ORDER BY 1,2,3')
+        data['application_triggers'] = self.rows("""SELECT n.nspname AS schema,c.relname AS table,t.tgname AS name,
+            md5(pg_get_triggerdef(t.oid)) AS definition_hash,t.tgenabled FROM pg_trigger t
+            JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE NOT t.tgisinternal AND """ + app_filter + ' ORDER BY 1,2,3')
+        data['views'] = self.rows("""SELECT n.nspname AS schema,c.relname AS name,c.relkind,
+            md5(pg_get_viewdef(c.oid)) AS definition_hash,pg_get_userbyid(c.relowner) AS owner,c.relacl::text AS acl
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE c.relkind IN ('v','m') AND """ + app_filter + ' ORDER BY 1,2')
+        data['indexes'] = self.rows("""SELECT n.nspname AS schema,c.relname AS table,i.relname AS name,
+            md5(pg_get_indexdef(i.oid)) AS definition_hash FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid
+            JOIN pg_class c ON c.oid=x.indrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE """ + app_filter + ' ORDER BY 1,2,3')
+        data['constraints'] = self.rows("""SELECT n.nspname AS schema,coalesce(c.relname,'') AS table,k.conname AS name,
+            md5(pg_get_constraintdef(k.oid)) AS definition_hash FROM pg_constraint k
+            JOIN pg_namespace n ON n.oid=k.connamespace LEFT JOIN pg_class c ON c.oid=k.conrelid
+            WHERE """ + app_filter + ' ORDER BY 1,2,3')
+        data['sequences'] = self.rows("""SELECT s.schemaname AS schema,s.sequencename AS name,s.sequenceowner,
+            s.data_type::text,s.start_value,s.min_value,s.max_value,s.increment_by,s.cycle,s.cache_size
+            FROM pg_sequences s JOIN pg_namespace n ON n.nspname=s.schemaname WHERE """ + app_filter + ' ORDER BY 1,2')
         return data
 
     def dump(self, folder, inventory):
@@ -153,14 +207,6 @@ class Database:
         if self.snapshot:
             args += ['--snapshot=' + self.snapshot]
         run(args + ['--file=' + str(folder / 'auth.dump')], env=self.env)
-        # Custom functions in managed schemas may refer to platform internals: block
-        # rather than silently skip them. Application functions belong in app schemas.
-        data = self.rows("""SELECT n.nspname AS schema,p.proname AS name FROM pg_proc p
-            JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
-            WHERE n.nspname IN ('auth','storage') AND r.rolname NOT LIKE 'supabase_%'
-            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid='pg_proc'::regclass
-            AND d.objid=p.oid AND d.deptype='e')""")
-        inventory['managed_functions'] = data
         managed = ['pg_dump', '--format=custom', '--schema-only', '--schema=auth', '--schema=storage']
         if self.snapshot:
             managed += ['--snapshot=' + self.snapshot]
@@ -173,19 +219,19 @@ class Database:
         # Platform event triggers/default privileges are maintained by Supabase;
         # replaying superuser-owned DDL is neither allowed nor portable.
         toc = run(['pg_restore','--list',str(folder/'database.dump')], env=self.env).decode()
-        selected = [line for line in toc.splitlines() if not (
-            re.match(r'^\d+; \d+ \d+ (EVENT TRIGGER|DEFAULT ACL) ', line)
-            and line.endswith(' supabase_admin'))]
-        (folder/'database.list').write_text('\n'.join(selected)+'\n')
-        for name in ('database', 'auth'):
-            selection = ['--use-list='+str(folder/'database.list')] if name == 'database' else []
-            run(['pg_restore', *selection, '--file=' + str(folder / (name + '.sql')),
-                 '--no-comments', str(folder / (name + '.dump'))], env=self.env)
+        (folder/'database.list').write_text(portable_toc(toc))
+        for section in ('pre-data','data','post-data'):
+            run(['pg_restore','--use-list='+str(folder/'database.list'),'--section='+section,
+                 '--file='+str(folder/('database-'+section+'.sql')),'--no-comments',
+                 str(folder/'database.dump')],env=self.env)
+        run(['pg_restore','--file='+str(folder/'auth.sql'),'--no-comments',str(folder/'auth.dump')],env=self.env)
         inventory['checksums'] = self.checksums(inventory)
+        inventory['row_counts'] = dict(self.last_row_counts)
         write_json(folder / 'database.json', inventory)
 
     def checksums(self, inventory):
         hashes = {}
+        counts = {}
         for t in inventory['tables']:
             schema, name = t['schema'], t['name']
             if t['relkind'] != 'r' or (schema in MANAGED and schema != 'auth') or (schema == 'auth' and name == 'schema_migrations'):
@@ -199,12 +245,16 @@ class Database:
             p.stdin.write(query.encode())
             p.stdin.close()
             h = hashlib.sha256()
+            count = 0
             for chunk in iter(lambda: p.stdout.read(1024 * 1024), b''):
                 h.update(chunk)
+                count += chunk.count(b'\n')
             p.stdout.close()
             if p.wait():
                 raise MigrationError('Falha ao calcular checksum de tabela.')
             hashes[schema + '.' + name] = h.hexdigest()
+            counts[schema + '.' + name] = count
+        self.last_row_counts = counts
         return hashes
 
     def restore(self, folder, previous, incoming):
@@ -216,7 +266,7 @@ class Database:
             cleanup.append(f'DROP POLICY IF EXISTS {qi(p["policyname"])} ON {qi(p["schemaname"])}.{qi(p["tablename"])};')
         for t in previous['triggers']:
             cleanup.append(f'DROP TRIGGER IF EXISTS {qi(t["name"])} ON {qi(t["schema"])}.{qi(t["table"])};')
-        for p in previous['publications']:
+        for p in application_inventory(previous)['publications']:
             cleanup.append('DROP PUBLICATION ' + qi(p['name']) + ';')
         for schema in previous['schemas']:
             if schema['name'] not in MANAGED:
@@ -242,7 +292,7 @@ class Database:
                 finish.append('ALTER TABLE ' + table + (' ENABLE' if t['rls'] else ' DISABLE') + ' ROW LEVEL SECURITY;')
                 finish.append('ALTER TABLE ' + table + (' FORCE' if t['force_rls'] else ' NO FORCE') + ' ROW LEVEL SECURITY;')
         for p in incoming['policies']:
-            statement = f'CREATE POLICY {qi(p["policyname"])} ON {qi(p["schemaname"])}.{qi(p["tablename"])} AS {p["permissive"]} FOR {p["cmd"]} TO ' + ','.join(qi(r) for r in p['roles'])
+            statement = f'CREATE POLICY {qi(p["policyname"])} ON {qi(p["schemaname"])}.{qi(p["tablename"])} AS {p["permissive"]} FOR {p["cmd"]} TO ' + ','.join('PUBLIC' if r=='public' else qi(r) for r in p['roles'])
             if p['qual']:
                 statement += ' USING (' + p['qual'] + ')'
             if p['with_check']:
@@ -252,8 +302,9 @@ class Database:
         finish.append("NOTIFY pgrst, 'reload schema';")
         (folder / 'finish.sql').write_text('\n'.join(finish), encoding='utf8')
         run(['psql','-X','-q','--single-transaction','-v','ON_ERROR_STOP=1',
-             '-f',str(folder/'cleanup.sql'),'-f',str(folder/'database.sql'),
-             '-f',str(folder/'auth.sql'),'-f',str(folder/'managed.sql'),'-f',str(folder/'finish.sql')], env=self.env)
+             '-f',str(folder/'cleanup.sql'),'-f',str(folder/'database-pre-data.sql'),
+             '-f',str(folder/'auth.sql'),'-f',str(folder/'database-data.sql'),
+             '-f',str(folder/'database-post-data.sql'),'-f',str(folder/'managed.sql'),'-f',str(folder/'finish.sql')], env=self.env)
 
 
 def role_statements(incoming, previous):

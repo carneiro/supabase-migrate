@@ -177,3 +177,4 @@ def verify_services(project, expected):
     for endpoint, config in expected['configs'].items():
         if config != actual['configs'][endpoint]:
             raise MigrationError('Verificação de configurações falhou: ' + endpoint)
+    return actual

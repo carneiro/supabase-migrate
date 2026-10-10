@@ -1,14 +1,17 @@
 """Disposable local PostgreSQL only; never connects to Supabase projects."""
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock,patch
 
 from supamigrate.core import MigrationError
 from supamigrate.database import Database, application_inventory
+from supamigrate.services import restore_storage,verify_storage
+from supamigrate.core import digest
 
 
 @unittest.skipUnless(os.environ.get('MIGRATE_TEST_POSTGRES')=='1','isolated PostgreSQL fixture not enabled')
@@ -120,3 +123,40 @@ class PostgresIntegrationTests(unittest.TestCase):
                 self.target.restore(folder,old,inv)
         self.assertEqual(original,self.target.checksums(self.target.inventory()))
         self.assertEqual(self.source.sql("SELECT count(*) FROM public.records WHERE body='preserve after rollback';"),'0')
+
+    def test_05_storage_owners_timestamps_and_physical_version_with_real_trigger(self):
+        self.target.sql('''
+        ALTER TABLE storage.objects ADD COLUMN created_at timestamptz DEFAULT now();
+        ALTER TABLE storage.objects ADD COLUMN updated_at timestamptz DEFAULT now();
+        ALTER TABLE storage.objects ADD COLUMN version text DEFAULT 'target-physical-version';
+        CREATE FUNCTION storage.touch() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN NEW.updated_at=now(); RETURN NEW; END $$;
+        CREATE TRIGGER touch BEFORE UPDATE ON storage.objects FOR EACH ROW EXECUTE FUNCTION storage.touch();
+        ''')
+        obj={'id':'22222222-2222-2222-2222-222222222222','bucket_id':'b','name':'file.txt',
+             'owner':'11111111-1111-1111-1111-111111111111','owner_id':'external-owner',
+             'created_at':'2020-01-01T00:00:00+00:00','updated_at':'2020-02-01T00:00:00+00:00',
+             'version':'source-physical-version','metadata':{'size':4,'mimetype':'text/plain'},'user_metadata':{'key':'value'}}
+        inv={'buckets':[{'id':'b','name':'b','public':False,'owner':obj['owner'],'owner_id':'bucket-owner'}],'objects':[obj]}
+        project=MagicMock()
+        with tempfile.TemporaryDirectory() as d:
+            folder=Path(d)
+            (folder/'objects').mkdir()
+            file=folder/'objects'/'0.bin'
+            file.write_bytes(b'data')
+            sha=digest(file)
+            (folder/'objects.json').write_text(json.dumps([{'object':obj,'file':'0.bin','sha256':sha}]))
+            def api(method,path,*args,**kwargs):
+                if method=='POST' and path=='/bucket':
+                    self.target.sql("INSERT INTO storage.buckets(id,name,public) VALUES('b','b',false);")
+                elif method=='POST':
+                    self.target.sql("INSERT INTO storage.objects(id,bucket_id,name) VALUES('33333333-3333-3333-3333-333333333333','b','file.txt');")
+                elif method=='GET':
+                    return sha
+            project.storage.request.side_effect=api
+            restore_storage(project,self.target,inv,folder)
+            verify_storage(project,self.target,inv,folder)
+            self.assertEqual(self.target.sql('SELECT version FROM storage.objects;'),'target-physical-version')
+            self.target.sql("UPDATE storage.buckets SET owner_id='wrong-owner';")
+            with self.assertRaises(MigrationError):
+                verify_storage(project,self.target,inv,folder)

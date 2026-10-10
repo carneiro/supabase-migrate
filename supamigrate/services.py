@@ -89,15 +89,24 @@ def restore_storage(project, db, inventory, folder):
             value = obj[key]
             encoded = 'NULL' if value is None else ql(json.dumps(value) if isinstance(value, (dict, list)) else str(value))
             assignments.append(qi(key) + '=' + encoded)
-        db.sql('UPDATE storage.objects SET ' + ','.join(assignments) + ' WHERE bucket_id=' + ql(obj['bucket_id']) + ' AND name=' + ql(obj['name']) + ';')
+        # Platform update triggers otherwise replace the captured updated_at.
+        db.sql('BEGIN; SET LOCAL session_replication_role=replica; UPDATE storage.objects SET ' + ','.join(assignments) + ' WHERE bucket_id=' + ql(obj['bucket_id']) + ' AND name=' + ql(obj['name']) + '; COMMIT;')
     for b in inventory['buckets']:
         fields = [k for k in ('owner','owner_id','created_at','updated_at') if k in b]
         if fields:
             assignments = [qi(k) + '=' + ('NULL' if b[k] is None else ql(str(b[k]))) for k in fields]
-            db.sql('UPDATE storage.buckets SET ' + ','.join(assignments) + ' WHERE id=' + ql(b['id']) + ';')
+            db.sql('BEGIN; SET LOCAL session_replication_role=replica; UPDATE storage.buckets SET ' + ','.join(assignments) + ' WHERE id=' + ql(b['id']) + '; COMMIT;')
 
 
 def verify_storage(project, db, inventory, folder):
+    buckets={b['id']:b for b in db.rows('SELECT * FROM storage.buckets ORDER BY id')}
+    expected_buckets={b['id']:b for b in inventory['buckets']}
+    if buckets.keys()!=expected_buckets.keys():
+        raise MigrationError('Verificação Storage: conjunto de buckets diferente.')
+    for key,bucket in expected_buckets.items():
+        for field in ('name','public','owner','owner_id','file_size_limit','allowed_mime_types','created_at','updated_at'):
+            if bucket.get(field)!=buckets[key].get(field):
+                raise MigrationError('Verificação Storage: configuração/owner de bucket diferente.')
     current = db.rows('SELECT * FROM storage.objects ORDER BY bucket_id,name')
     manifest = json.loads((Path(folder)/'objects.json').read_text())
     expected = {(o['bucket_id'],o['name']): o for o in inventory['objects']}
@@ -105,7 +114,7 @@ def verify_storage(project, db, inventory, folder):
     if expected.keys() != actual.keys():
         raise MigrationError('Verificação Storage: conjunto de objetos diferente.')
     for key, obj in expected.items():
-        for field in ('id','owner','owner_id','user_metadata'):
+        for field in ('id','owner','owner_id','user_metadata','created_at','updated_at'):
             if obj.get(field) != actual[key].get(field):
                 raise MigrationError('Verificação Storage: identidade/owner/metadados diferentes.')
     check = Path(folder)/'verify-object.tmp'

@@ -274,7 +274,11 @@ class Database:
         auth = [qi(t['schema']) + '.' + qi(t['name']) for t in previous['tables']
                 if t['schema'] == 'auth' and t['name'] != 'schema_migrations' and t['relkind'] == 'r']
         if auth:
-            cleanup.append('TRUNCATE ' + ','.join(auth) + ' RESTART IDENTITY;')
+            # Older Storage schemas may keep FKs to auth.users even after the
+            # Storage API emptied the buckets. TRUNCATE rejects those structural
+            # references. DELETE under replica mode avoids CASCADE into managed
+            # tables; Auth sequence values are restored by the data-only dump.
+            cleanup += ['DELETE FROM ONLY ' + table + ';' for table in auth]
         if previous.get('cron.job'):
             cleanup.append('SELECT cron.unschedule(jobid) FROM cron.job;')
         incoming_roles = {r['name'] for r in incoming['roles']}

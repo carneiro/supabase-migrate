@@ -36,7 +36,10 @@ jobs:
         with:
           python-version: '3.12'
       - name: Use PostgreSQL 17 client tools
-        run: echo '/usr/lib/postgresql/17/bin' >> "$GITHUB_PATH"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y postgresql-client-17
+          echo '/usr/lib/postgresql/17/bin' >> "$GITHUB_PATH"
       - name: Test snapshot, Auth FK restore and rollback in disposable databases
         env:
           MIGRATE_TEST_POSTGRES: '1'

@@ -101,6 +101,8 @@ O diff identifica tabelas e recursos ausentes ou alterados, sem exportar valores
 
 Se a coleta do diff final falhar, o relatório registra `not_collected` e a execução retorna código 2. Isso **não desfaz** uma migração já concluída. Consulte `migration_phase` e `migration_completed` para distinguir falha de cópia de comparação incompleta. Relatórios finais não incluem valores de secrets; backups e outros arquivos da execução continuam sensíveis e não devem ser compartilhados.
 
+`--recover` preserva o relatório da migração e gera outro em `<execução>/recovery-<id>/`. Esse modo observa apenas o destino recuperado, pois não solicita credenciais da origem; execute `--diff` separadamente para comparar ambos.
+
 ## Validação
 
 ```bash

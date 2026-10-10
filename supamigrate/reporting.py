@@ -186,6 +186,7 @@ def build_report(context):
     report = {'report_version':1,'generated_at':now(),'source':context['state']['source'],
         'target':context['state']['target'],'migration_phase':phase,'migration_completed':migrated,
         'comparison_complete':bool(current_source and target), 'features':features,'diffs':diffs,
+        'recovery_only':context.get('recovery_only',False),
         'observations':{key:{'started_at':o['started_at'],'finished_at':o['finished_at'],
             'data_checksums_collected':'checksums' in o['inventory'],'counts':counts(o)} for key,o in observations.items()},
         'edge_bundle_hash_comparison':compare_maps(function_hashes(current_source),function_hashes(target)),
@@ -200,6 +201,8 @@ def build_report(context):
             'Secrets Edge: somente nomes; igualdade dos valores nunca é presumida.',
             'Schemas/publicações internos do Realtime pertencem à plataforma e são preservados no destino.'
         ]}
+    if context.get('recovery_only'):
+        report['caveats'].append('Recuperação manual observa apenas o destino; use --diff depois para comparar com a origem.')
     return report
 
 

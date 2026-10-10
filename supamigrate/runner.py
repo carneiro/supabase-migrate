@@ -250,9 +250,23 @@ def execute(args, context):
         if args.recover:
             if input('Para recuperar o backup, digite RECUPERAR ' + target + ': ') != 'RECUPERAR ' + target:
                 raise MigrationError('Recuperação cancelada.')
-            recover(dst,dst_db,recover_dir/'target',token,lambda phase: print(phase,flush=True))
-            state['phase']='recovered'
-            write_json(recover_dir/'state.json',state)
+            # Keep the original migration report; recovery has its own audit trail.
+            report_dir=recover_dir/('recovery-'+uuid.uuid4().hex[:8])
+            report_dir.mkdir(mode=0o700)
+            state=dict(state,phase='recovering')
+            context.update(run_dir=report_dir,state=state,target_db=dst_db,target_project=dst,
+                           report_data=True,observations={},recovery_only=True)
+            def recovery_checkpoint(phase):
+                state['phase']=phase
+                write_json(report_dir/'state.json',state)
+                write_json(recover_dir/'state.json',state)
+                print('Etapa:',phase,flush=True)
+            try:
+                recover(dst,dst_db,recover_dir/'target',token,recovery_checkpoint)
+            except BaseException:
+                recovery_checkpoint('recovery_failed')
+                raise
+            recovery_checkpoint('recovered')
             print('Destino recuperado e verificado. Secrets nunca foram alterados.')
             return 0
         src = Project(source, token, source=True)

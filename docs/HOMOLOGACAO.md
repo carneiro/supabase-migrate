@@ -1,6 +1,6 @@
 # Homologação em projetos descartáveis
 
-Esta implementação ainda não foi executada contra dois projetos Supabase reais. A API é evolutiva; os testes locais verificam contratos de controle, não autorizam presumir compatibilidade de todos os objetos remotos.
+Uma migração completa ainda não foi executada contra dois projetos Supabase reais. O CI testa restauração e rollback em PostgreSQL isolado. A API é evolutiva; os testes automatizados não autorizam presumir compatibilidade de todos os objetos remotos.
 
 Use dois projetos sem dados de produção, mesma major PostgreSQL, mesmas extensões/versões e mesma versão interna de Auth/Storage. Verifique também quotas de armazenamento, tamanho máximo de upload e Functions no plano do destino.
 
@@ -10,7 +10,7 @@ Use dois projetos sem dados de produção, mesma major PostgreSQL, mesmas extens
 4. Habilite Realtime em algumas tabelas. Publique Functions com e sem `verify_jwt`, uma com nome de exibição distinto e uma que dependa de secret manual.
 5. Coloque dados diferentes no destino. Mantenha somente o operador conectado, sem clientes, gravações e jobs. Guarde também um backup independente.
 6. Execute `./migrate --plan`. Verifique a cobertura e resolva todos os bloqueios sem usar dados reais.
-7. Execute `./migrate`. Confira o relatório final, login novo com a senha anterior, UUIDs, hashes/contagens, RLS para usuários diferentes, memberships/ACLs, Realtime, download autorizado/negado e owners dos arquivos.
+7. Execute `./migrate --diff` para registrar o estado inicial, depois `./migrate`. Confira `final-report.md`/`final-report.json`, separando snapshot verificado de alterações posteriores na origem. Valide login novo com a senha anterior, UUIDs, hashes/contagens, RLS para usuários diferentes, memberships/ACLs, Realtime, download autorizado/negado e owners dos arquivos.
 8. Insira os secrets manualmente pelo Dashboard/CLI no destino; então invoque as Functions com autenticação correta e confira seus resultados. A invocação não é automatizada porque pode produzir efeitos externos.
 9. Em uma execução separada, provoque uma falha de API depois da limpeza. Confirme retorno diferente de zero, recuperação dos dados/arquivos/Functions/configurações antigos e estado `failed_recovered`.
 10. Teste interrupção abrupta e `./migrate --recover <execução>`. Confirme que backup corrompido é recusado, e que uma falha de recuperação mantém `recovery_failed`.

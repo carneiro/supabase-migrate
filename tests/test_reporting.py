@@ -87,6 +87,8 @@ class ReportingTests(unittest.TestCase):
                 result=finish_report(ctx)
             recovery.assert_not_called()
             self.assertEqual(result['errors'],['source_observation_failed','target_observation_failed'])
+            self.assertFalse(result['comparison_complete'])
+            self.assertEqual(result['features']['database']['current_diff'],'not_collected')
             self.assertNotIn('secret failure',json.dumps(result))
             self.assertTrue((Path(d)/'final-report.md').is_file())
 

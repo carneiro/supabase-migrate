@@ -1,8 +1,11 @@
 """Disposable local PostgreSQL only; never connects to Supabase projects."""
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from supamigrate.core import MigrationError
 from supamigrate.database import Database, application_inventory
@@ -12,6 +15,17 @@ from supamigrate.database import Database, application_inventory
 class PostgresIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Only fixture commands/values exist here. Expose stderr in CI diagnostics,
+        # while the production runner continues to suppress sensitive stderr.
+        original_run=subprocess.run
+        def fixture_run(*args,**kwargs):
+            result=original_run(*args,**kwargs)
+            if result.returncode and result.stderr:
+                print(result.stderr.decode(errors='replace'),file=sys.stderr)
+            return result
+        diagnostic=patch('supamigrate.core.subprocess.run',side_effect=fixture_run)
+        diagnostic.start()
+        cls.addClassCleanup(diagnostic.stop)
         # Fixed loopback host, unique test DBs, no caller-provided remote DSN.
         cls.env=dict(os.environ,PGHOST='127.0.0.1',PGPORT='5432',PGUSER='postgres',
                      PGPASSWORD='migration-test-only',PGDATABASE='postgres',PGSSLMODE='disable')

@@ -214,6 +214,13 @@ def write_report(context):
            '| --- | --- | --- | --- |']
     for item in report['features'].values():
         lines.append('| '+' | '.join(item[k] for k in ('label','migration_status','snapshot_diff','current_diff'))+' |')
+    lines += ['', '| Observação | Tabelas aplicação | Usuários Auth | Buckets | Arquivos | Bytes Storage | Edge Functions |',
+              '| --- | --- | --- | --- | --- | --- | --- |']
+    for name,item in report['observations'].items():
+        c=item['counts']
+        lines.append('| '+name+' | '+' | '.join(str(c[k]) if c[k] is not None else 'não contado' for k in
+            ('application_tables','auth_users','buckets','objects','storage_bytes','edge_functions'))+' |')
+    lines += ['', 'Secrets Edge para migração manual: '+(', '.join(report['edge_secrets_manual']) or 'nenhum nome coletado')+'.']
     lines += ['','Os detalhes completos, contagens e janelas de observação estão em `final-report.json`.','']
     lines += ['- '+note for note in report['caveats']]
     if report['errors']:
@@ -233,6 +240,7 @@ def finish_report(context):
         try:
             context['observations'][side+'_current']=observe(db,project,data=context.get('report_data',True))
         except Exception:
+            context['observations'].pop(side+'_current',None)
             context.setdefault('report_errors',[]).append(side+'_observation_failed')
     report=write_report(context)
     print('Relatório final:',Path(context['run_dir'])/'final-report.md',flush=True)

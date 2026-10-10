@@ -6,7 +6,7 @@ Migração de projeto Supabase, executada por um único comando na raiz:
 ./migrate
 ```
 
-**Estado: implementação inicial, com testes locais; ainda precisa de homologação em dois projetos Supabase descartáveis.** Não promete clonagem de 100% da plataforma ou atomicidade global. PostgreSQL, Storage, Edge Functions e Management API não participam da mesma transação. O banco é substituído em uma transação; as outras etapas têm recuperação compensatória por backup, que também pode falhar. Recursos sem um caminho de cópia confiável bloqueiam a operação antes da limpeza.
+**Estado: testes automatizados e integração PostgreSQL no CI; a execução completa em Supabase ainda precisa de homologação.** Não promete clonagem de 100% da plataforma ou atomicidade global. PostgreSQL, Storage, Edge Functions e Management API não participam da mesma transação. O banco é substituído em uma transação; as outras etapas têm recuperação compensatória por backup, que também pode falhar. Recursos sem um caminho de cópia confiável bloqueiam a operação antes da limpeza.
 
 ## Uso
 
@@ -27,6 +27,9 @@ Opcionalmente, forneça credenciais pelo ambiente: `SUPABASE_ACCESS_TOKEN`, `SOU
 # Apenas inventário e estimativa. Não apaga nem importa recursos.
 ./migrate --plan
 
+# Diff dos estados atuais, incluindo checksums das tabelas. Somente leitura.
+./migrate --diff --source ID_ORIGEM --target ID_DESTINO
+
 # Estimativa usando uma taxa nominal de 25 MiB/s.
 ./migrate --throughput-mib 25
 
@@ -45,6 +48,8 @@ A limpeza começa **depois** de verificar os backups. O script não apaga o proj
 
 Cada captura usa um snapshot PostgreSQL exportado, compartilhado entre dumps e checksums. A origem permanece online e pode receber gravações; **gravações posteriores ao snapshot não entram na migração**. Storage não dispõe de snapshot conjunto com o banco: o script compara inventário/versões depois do download e aborta se detectar alterações. Isso não equivale a CDC, sincronização contínua ou consistência distribuída perfeita.
 
+As transações de snapshot são encerradas antes do download de arquivos e bundles, para não manter uma transação PostgreSQL aberta durante toda a transferência. Na restauração, o schema da aplicação é criado primeiro, os dados Auth e de aplicação vêm em seguida e as constraints/triggers são aplicadas depois. Isso preserva referências a `auth.users`.
+
 A estimativa é uma faixa heurística, não um SLA: considera tamanho do banco, quantidade/tamanho de objetos, funções, backup, restore e verificações, usando 10 MiB/s por padrão. A captura e o cálculo dos checksums consomem I/O da origem. O inventário de metadados fica em memória; arquivos são transferidos em streaming para disco.
 
 ## Cobertura e limites
@@ -55,7 +60,7 @@ A estimativa é uma faixa heurística, não um SLA: considera tamanho do banco, 
 | Histórico CLI `supabase_migrations` | Incluído no dump de aplicação. |
 | Auth | Dados das tabelas, incluindo usuários, UUIDs e hashes de senha; schema gerenciado mantido. Versões/tabelas incompatíveis bloqueiam. |
 | Customizações auth/storage | Policies, triggers, ACLs e flags RLS; funções e tabelas customizadas nesses schemas bloqueiam. |
-| Realtime | Publicações, associação de tabelas e configuração exposta pela Management API. Conexões/mensagens transitórias não são copiadas. |
+| Realtime | Publicações da aplicação, associação de tabelas e configuração exposta pela Management API. Publicações internas `supabase_realtime_*` e partições gerenciadas permanecem no destino; `supabase_realtime` é migrada. Conexões/mensagens transitórias não são copiadas. |
 | Storage padrão | Buckets, bytes dos objetos, IDs, `owner`, `owner_id`, timestamps e `user_metadata`; preserva versão física/ETag criados no destino. Valida bytes por SHA-256. |
 | Edge Functions | Download e deploy via CLI, preservando `verify_jwt` e nome. Exige `index.ts` e bundle sem import map declarado. Dependências não recuperáveis bloqueiam antes da limpeza. |
 | Secrets de Edge Functions | Somente nomes no relatório e no final. Valores não são exportados, criados ou apagados. Secrets já existentes no destino permanecem e precisam de revisão. |
@@ -81,6 +86,21 @@ Backups, bundles, configurações e relatórios ficam em `.migrate/<execução>/
 
 O lock local evita duas execuções no mesmo diretório para o mesmo destino; não é um lock distribuído. Mantenha somente um operador por destino. Relatórios não contêm valores de secrets; erros de subprocessos são sanitizados para não imprimir dados sensíveis.
 
+## Relatório e diff
+
+Ao terminar uma migração, um plano ou um `--diff`, o script grava `final-report.md` e `final-report.json` no diretório privado da execução. Também tenta gerar esses arquivos quando a operação falha após abrir o diretório da execução. O relatório mostra o estado de cada recurso, contagens de tabelas/linhas/usuários/arquivos/owners/funções, nomes dos secrets manuais e quatro comparações:
+
+- Snapshot capturado × destino verificado: evidência da cópia executada.
+- Origem atual × destino atual: diferenças observadas ao final.
+- Snapshot × origem atual: gravações ou alterações posteriores à captura.
+- Destino anterior × destino atual: efeito da operação no destino.
+
+As observações têm horários próprios: a origem continua online, portanto igualdade instantânea entre serviços não é garantida. Divergência atual não anula automaticamente uma cópia correta do snapshot. `--plan` não calcula checksums nem conta linhas: registra `data_not_checked`, sem presumir igualdade dos dados. `--diff` lê todas as linhas das tabelas migráveis para calcular fingerprints; pode consumir I/O e deve ser executado em horário adequado à carga da aplicação.
+
+O diff identifica tabelas e recursos ausentes ou alterados, sem exportar valores de linhas, configurações, SQL, owners ou nomes dos arquivos. Objetos Storage aparecem por identificador opaco derivado do caminho. Os detalhes são limitados a 200 chaves por categoria, com contagens totais e indicação de truncamento. O diff atual de Storage compara metadados; os bytes são verificados por SHA-256 durante a migração. Hashes de bundles Edge são informativos, pois o empacotamento pode conter IDs do projeto; nenhuma Function é invocada automaticamente.
+
+Se a coleta do diff final falhar, o relatório registra `not_collected` e a execução retorna código 2. Isso **não desfaz** uma migração já concluída. Consulte `migration_phase` e `migration_completed` para distinguir falha de cópia de comparação incompleta. Relatórios finais não incluem valores de secrets; backups e outros arquivos da execução continuam sensíveis e não devem ser compartilhados.
+
 ## Validação
 
 ```bash
@@ -89,6 +109,6 @@ bash -n migrate
 ./migrate --help
 ```
 
-Os testes usam dublês de banco/API para verificar guards, fluxos de falha/recuperação, confirmação, snapshots compartilhados, backup corrompido, owners e transação. Não substituem um teste real de permissões do Supabase, quotas, bundles, OAuth ou extensões. Veja [homologação](docs/HOMOLOGACAO.md) antes de usar dados de produção.
+Os testes unitários usam dublês de banco/API para verificar guards, fluxos de falha/recuperação, confirmação, backup corrompido, owners e relatórios sem vazamento de valores. O CI também executa PostgreSQL 17 em bancos descartáveis para testar proteção da origem, snapshot compartilhado, restauração com FK para Auth, RLS, extensão em `public`, preservação do Realtime interno e rollback de falha injetada. Esses testes de integração ficam desabilitados por padrão localmente e nunca recebem credenciais dos projetos reais. Não substituem um teste real de permissões do Supabase, quotas, bundles e OAuth. Veja [homologação](docs/HOMOLOGACAO.md).
 
 Contratos consultados: [backup/restore oficial](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore), [Management API](https://supabase.com/docs/reference/api/introduction), [OpenAPI](https://github.com/supabase/supabase/blob/master/apps/docs/spec/api_v1_openapi.json) e ajuda da CLI 2.120.0. A tentativa de consultar `https://supabase.com/changelog.md` ficou indisponível no ambiente de desenvolvimento; os contratos foram conferidos pelas ferramentas de documentação e GitHub.

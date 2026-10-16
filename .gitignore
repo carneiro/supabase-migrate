@@ -1,0 +1,7 @@
+work/
+.migrate/
+.env
+.env.*
+__pycache__/
+*.pyc
+.venv/

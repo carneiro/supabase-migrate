@@ -40,13 +40,13 @@ class ReportingTests(unittest.TestCase):
         ctx=context()
         for o in ctx['observations'].values():
             o['services']['configs']={'config/auth':{'smtp_pass':'SECRET_DO_NOT_LEAK','smtp_user':'person@example.test'}}
-            o['inventory']['objects']=[{'id':'object-uuid','bucket_id':'b','name':'PRIVATE_PATIENT_NAME.wav',
+            o['inventory']['objects']=[{'id':'object-uuid','bucket_id':'b','name':'PRIVATE_FILE_NAME.wav',
                 'owner':'PRIVATE_OWNER_UUID','owner_id':'PRIVATE_EXTERNAL_ID','user_metadata':{'text':'PRIVATE_NOTE'},'metadata':{'size':3}}]
             o['inventory']['policies']=[{'schemaname':'storage','tablename':'objects','policyname':'policy','qual':"secret='SQL_SECRET'"}]
         ctx['observations']['target_current']['services']['configs']['config/auth']['smtp_pass']='DIFFERENT_PASSWORD'
         report=build_report(ctx)
         serialized=json.dumps(report)
-        for private in ['SECRET_DO_NOT_LEAK','person@example.test','PRIVATE_PATIENT_NAME','PRIVATE_OWNER_UUID',
+        for private in ['SECRET_DO_NOT_LEAK','person@example.test','PRIVATE_FILE_NAME','PRIVATE_OWNER_UUID',
                         'PRIVATE_EXTERNAL_ID','PRIVATE_NOTE','SQL_SECRET','DIFFERENT_PASSWORD']:
             self.assertNotIn(private,serialized)
         self.assertIn('config/auth/smtp_pass',serialized)

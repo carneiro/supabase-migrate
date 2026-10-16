@@ -13,9 +13,9 @@ from .services import inspect_services
 FEATURES = ('database', 'auth', 'rls_functions', 'realtime', 'storage',
             'edge_functions', 'configuration', 'edge_secrets', 'extensions',
             'cron', 'vault', 'storage_vectors_analytics', 'platform')
-LABELS = dict(zip(FEATURES, ('Database', 'Auth', 'RLS e funções SQL', 'Realtime',
-    'Storage', 'Edge Functions', 'Configurações', 'Secrets Edge', 'Extensões',
-    'Cron', 'Vault/pgsodium', 'Storage vetorial/analítico', 'Plataforma')))
+LABELS = dict(zip(FEATURES, ('Database', 'Auth', 'RLS and SQL functions', 'Realtime',
+    'Storage', 'Edge Functions', 'Configuration', 'Edge secrets', 'Extensions',
+    'Cron', 'Vault/pgsodium', 'Vector/analytics Storage', 'Platform')))
 
 
 def now():
@@ -87,7 +87,7 @@ def feature_maps(obs):
         maps['storage']['bucket:' + bucket['id']] = {k:bucket.get(k) for k in
             ('name','public','owner','owner_id','file_size_limit','allowed_mime_types','type')}
     for obj in inv.get('objects', []):
-        # File paths may contain patient names. Do not expose paths/owners/metadata.
+        # File paths may contain personal information. Do not expose paths/owners/metadata.
         key = hashlib.sha256(_name(obj['bucket_id'],obj['name']).encode()).hexdigest()
         maps['storage']['object:' + key] = {k:obj.get(k) for k in ('id','owner','owner_id','user_metadata')}
         meta = obj.get('metadata') or {}
@@ -195,16 +195,16 @@ def build_report(context):
         'edge_secrets_manual':list((snapshot or current_source or {}).get('services',{}).get('secret_names',[])),
         'errors':context.get('report_errors',[]),
         'caveats':[
-            'Os dois estados atuais são observados em janelas distintas; a origem continua online.',
-            'Diferenças atuais podem ser gravações posteriores ao snapshot; não comprovam falha da cópia.',
-            'Valores de configuração, dados pessoais, SQL e owners não são expostos; só nomes/chaves e contagens de diferenças.',
-            'Storage atual compara inventário e metadados. Bytes são verificados durante a migração, não baixados novamente para o diff.',
-            'SHA de bundle Edge diferente não prova diferença semântica: o empacotamento pode conter IDs do projeto. Runtime não invocado.',
-            'Secrets Edge: somente nomes; igualdade dos valores nunca é presumida.',
-            'Schemas/publicações internos do Realtime pertencem à plataforma e são preservados no destino.'
+            'Current states are observed in separate time windows; the source remains online.',
+            'Current differences may be writes after the snapshot; they do not prove copy failure.',
+            'Configuration values, personal data, SQL, and owners are not exposed; only names/keys and difference counts.',
+            'Current Storage comparison uses inventory and metadata. Bytes are verified during migration, not downloaded again for comparison.',
+            'Different Edge bundle hashes do not prove semantic differences: bundles may contain project IDs. Runtime is not invoked.',
+            'Edge secrets: names only; equality of values is never assumed.',
+            'Internal Realtime schemas/publications belong to the platform and are preserved on the target.'
         ]}
     if context.get('recovery_only'):
-        report['caveats'].append('Recuperação manual observa apenas o destino; use --diff depois para comparar com a origem.')
+        report['caveats'].append('Manual recovery observes only the target; run ./migrate --diff afterwards to compare with the source.')
     return report
 
 
@@ -212,24 +212,24 @@ def write_report(context):
     report = build_report(context)
     folder = Path(context['run_dir'])
     write_json(folder/'final-report.json',report)
-    lines=['# Relatório de migração Supabase','',
-           'Origem: '+report['source']+' — Destino: '+report['target'],
-           '','Estado: `'+report['migration_phase']+'`',
-           '','| Recurso | Migração | Snapshot × destino verificado | Origem atual × destino atual |',
+    lines=['# Supabase migration report','',
+           'Source: '+report['source']+' — Target: '+report['target'],
+           '','State: `'+report['migration_phase']+'`',
+           '','| Feature | Migration | Snapshot vs. verified target | Current source vs. current target |',
            '| --- | --- | --- | --- |']
     for item in report['features'].values():
         lines.append('| '+' | '.join(item[k] for k in ('label','migration_status','snapshot_diff','current_diff'))+' |')
-    lines += ['', '| Observação | Tabelas aplicação | Usuários Auth | Buckets | Arquivos | Bytes Storage | Edge Functions |',
+    lines += ['', '| Observation | Application tables | Auth users | Buckets | Files | Storage bytes | Edge Functions |',
               '| --- | --- | --- | --- | --- | --- | --- |']
     for name,item in report['observations'].items():
         c=item['counts']
-        lines.append('| '+name+' | '+' | '.join(str(c[k]) if c[k] is not None else 'não contado' for k in
+        lines.append('| '+name+' | '+' | '.join(str(c[k]) if c[k] is not None else 'not counted' for k in
             ('application_tables','auth_users','buckets','objects','storage_bytes','edge_functions'))+' |')
-    lines += ['', 'Secrets Edge para migração manual: '+(', '.join(report['edge_secrets_manual']) or 'nenhum nome coletado')+'.']
-    lines += ['','Os detalhes completos, contagens e janelas de observação estão em `final-report.json`.','']
+    lines += ['', 'Edge secrets requiring manual migration: '+(', '.join(report['edge_secrets_manual']) or 'no names collected')+'.']
+    lines += ['','Full details, counts, and observation windows are in `final-report.json`.','']
     lines += ['- '+note for note in report['caveats']]
     if report['errors']:
-        lines += ['','Comparação incompleta: '+', '.join(report['errors'])]
+        lines += ['','Comparison incomplete: '+', '.join(report['errors'])]
     (folder/'final-report.md').write_text('\n'.join(lines)+'\n',encoding='utf8')
     (folder/'final-report.md').chmod(0o600)
     return report
@@ -248,7 +248,7 @@ def finish_report(context):
             context['observations'].pop(side+'_current',None)
             context.setdefault('report_errors',[]).append(side+'_observation_failed')
     report=write_report(context)
-    print('Relatório final:',Path(context['run_dir'])/'final-report.md',flush=True)
+    print('Final report:',Path(context['run_dir'])/'final-report.md',flush=True)
     if report['errors']:
-        print('Diff incompleto; consulte final-report.json. Nenhum sucesso de comparação presumido.',flush=True)
+        print('Comparison incomplete; see final-report.json. Comparison success is not assumed.',flush=True)
     return report

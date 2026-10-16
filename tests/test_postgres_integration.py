@@ -67,7 +67,7 @@ class PostgresIntegrationTests(unittest.TestCase):
         CREATE TABLE supabase_migrations.schema_migrations(version text PRIMARY KEY);
         INSERT INTO supabase_migrations.schema_migrations VALUES('20261010010101');
         INSERT INTO auth.users VALUES('11111111-1111-1111-1111-111111111111','fixture@example.test');
-        INSERT INTO public.records(user_id,body) VALUES('11111111-1111-1111-1111-111111111111','Olá');
+        INSERT INTO public.records(user_id,body) VALUES('11111111-1111-1111-1111-111111111111','café');
         '''
         for db in cls.dbs:
             db.sql(fixture)
@@ -106,7 +106,7 @@ class PostgresIntegrationTests(unittest.TestCase):
             self.assertEqual(actual['managed_default_acl'],inv['managed_default_acl'])
             self.assertEqual(self.target.sql("SELECT count(*) FROM pg_publication WHERE pubname='supabase_realtime_messages_publication';"),'1')
             self.assertEqual(self.target.sql("SELECT to_regclass('realtime.target_only') IS NOT NULL;"),'t')
-            self.assertEqual(self.target.sql("SELECT public.normalize('Olá');"),'Ola')
+            self.assertEqual(self.target.sql("SELECT public.normalize('café');"),'cafe')
 
     def test_04_injected_restore_failure_rolls_back_schema_and_data(self):
         self.target.sql("UPDATE public.records SET body='preserve after rollback';")

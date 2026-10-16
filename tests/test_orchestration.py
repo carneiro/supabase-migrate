@@ -28,7 +28,7 @@ class OrchestrationTests(unittest.TestCase):
             stack.enter_context(patch('supamigrate.runner.inspect_services',side_effect=lambda project:services()))
             stack.enter_context(patch('supamigrate.runner.check_manifest'))
             stack.enter_context(patch('supamigrate.runner.capture_assets'))
-            stack.enter_context(patch('builtins.input',return_value='MIGRAR '+TARGET if confirm else 'no'))
+            stack.enter_context(patch('builtins.input',return_value='MIGRATE '+TARGET if confirm else 'no'))
             stack.enter_context(patch('sys.stdout',new=io.StringIO()))
             stack.enter_context(patch('sys.stderr',new=io.StringIO()))
             if fail_report:
@@ -86,7 +86,7 @@ class OrchestrationTests(unittest.TestCase):
             stack.enter_context(patch('supamigrate.runner.Project'))
             stack.enter_context(patch('supamigrate.runner.recover'))
             stack.enter_context(patch('supamigrate.reporting.observe',return_value={'inventory':inventory(),'services':services(),'started_at':'t','finished_at':'t'}))
-            stack.enter_context(patch('builtins.input',return_value='RECUPERAR '+TARGET))
+            stack.enter_context(patch('builtins.input',return_value='RECOVER '+TARGET))
             stack.enter_context(patch('sys.stdout',new=io.StringIO()))
             self.assertEqual(main(['--recover',str(folder),'--work-dir',directory]),0)
             credentials.assert_called_once_with(None,TARGET)
@@ -99,7 +99,7 @@ class OrchestrationTests(unittest.TestCase):
 
     def test_cancel_leaves_target_intact(self):
         result=self.run_scenario(confirm=False)
-        self.assertIn('cancelada',result['error'])
+        self.assertIn('cancelled',result['error'])
         result['capture'].assert_not_called()
         result['replace'].assert_not_called()
         result['recover'].assert_not_called()
@@ -114,7 +114,7 @@ class OrchestrationTests(unittest.TestCase):
         result=self.run_scenario(fail_replace=True)
         result['recover'].assert_called_once()
         self.assertEqual(result['state']['phase'],'failed_recovered')
-        self.assertIn('não concluída',result['error'])
+        self.assertIn('not completed',result['error'])
 
     def test_failed_recovery_is_not_reported_as_success(self):
         result=self.run_scenario(fail_replace=True,fail_recover=True)

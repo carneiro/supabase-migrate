@@ -1,109 +1,146 @@
 # supabase-migrate
 
-Migração de projeto Supabase, executada por um único comando na raiz:
+Migrate supported resources from one hosted Supabase project to another with a single command:
 
 ```bash
 ./migrate
 ```
 
-**Estado: testes automatizados e integração PostgreSQL no CI; a execução completa em Supabase ainda precisa de homologação.** Não promete clonagem de 100% da plataforma ou atomicidade global. PostgreSQL, Storage, Edge Functions e Management API não participam da mesma transação. O banco é substituído em uma transação; as outras etapas têm recuperação compensatória por backup, que também pode falhar. Recursos sem um caminho de cópia confiável bloqueiam a operação antes da limpeza.
+A standalone, dependency-free Python tool for project-to-project migration, with preflight checks, target backups, snapshot verification, and recovery. It has no application-specific table lists, business rules, or organization configuration. This is an independent community project, not an official Supabase product.
 
-## Uso
+**Status: experimental.** Automated unit tests and a disposable PostgreSQL integration workflow are included. Full end-to-end validation against two hosted Supabase projects is still required. The tool does not promise a complete platform clone or a globally atomic migration.
 
-Requisitos: Linux/macOS/WSL, Bash, Python **3.10+**, clientes PostgreSQL (`psql`, `pg_dump`, `pg_restore`) da mesma major do servidor e Supabase CLI com `functions download/deploy --use-api` (comandos conferidos na versão **2.120.0**). Não há dependências Python, Docker nem instalação automática de pacotes.
+## Requirements
 
-1. Clone este repositório e entre na pasta.
-2. Execute `./migrate`.
-3. Informe o ID de origem e, em seguida, o ID de destino.
-4. Informe o Personal Access Token e as duas URLs PostgreSQL com senha, em prompts ocultos. As URLs ficam em **Connect** no Dashboard. Use conexão direta ou **Session pooler**, porta **5432**; o transaction pooler não serve para snapshots.
-5. Leia o inventário, a estimativa, os limites e os bloqueios encontrados.
-6. Isole o destino de clientes, gravações e jobs. Confirme digitando `MIGRAR <ID_DESTINO>`.
+- Linux, macOS, or WSL with Bash and Python **3.10+**. Native Windows is not supported.
+- PostgreSQL client tools (`psql`, `pg_dump`, `pg_restore`) matching the server major version.
+- Supabase CLI supporting `functions download/deploy --use-api` and `--project-ref`. The existing implementation was developed against CLI **2.120.0**; required flags are checked at runtime.
+- A [Supabase Personal Access Token](https://supabase.com/dashboard/account/tokens) with access to both projects, configuration/key/function read access, and target write access.
+- Both database connection URLs, with passwords, from the Dashboard **Connect** panel. Use a direct connection or **Session pooler on port 5432**, not the transaction pooler.
+- Local disk space for both snapshots, downloaded files, and verification, on a protected filesystem.
 
-O PAT precisa de acesso aos dois projetos, leitura de configurações/chaves/funções e permissão de escrita no destino. Obtenha-o em <https://supabase.com/dashboard/account/tokens>. A autenticação do MCP neste chat **não é herdada** pelo script. O script passa o PAT ao CLI por variável de ambiente, sem colocá-lo na linha de comando. Não precisa executar `supabase link` e não altera o vínculo de outro diretório.
+No Python packages or Docker are required to run the tool. Dependencies are not installed automatically. `--plan` and `--diff` only need Python, Bash, and `psql`.
 
-Opcionalmente, forneça credenciais pelo ambiente: `SUPABASE_ACCESS_TOKEN`, `SOURCE_DB_URL`, `TARGET_DB_URL`. Evite salvar valores no histórico do terminal. IDs podem ser passados com `--source` e `--target`; a confirmação destrutiva continua obrigatória. Não há `--yes`.
+## Quick start
+
+1. Clone this repository and open its directory.
+2. Run `./migrate --plan` and enter the source and target project references, then the token and database URLs at hidden prompts.
+3. Review the inventory, estimate, limitations, and blockers. Resolve compatibility issues before migrating.
+4. Take an independent backup and isolate the target from clients, jobs, and writes.
+5. Run `./migrate`, review the plan again, and type `MIGRATE <TARGET_PROJECT_REF>` when prompted.
+6. Review the final report, configure manual secrets and OAuth callbacks, and validate the application before switching clients.
+
+**Migration replaces supported content on the target.** The source project is not modified by this tool. There is no `--yes` flag: migration and recovery require an interactive terminal and explicit target confirmation.
+
+You may provide project references as arguments:
 
 ```bash
-# Apenas inventário e estimativa. Não apaga nem importa recursos.
-./migrate --plan
-
-# Diff dos estados atuais, incluindo checksums das tabelas. Somente leitura.
-./migrate --diff --source ID_ORIGEM --target ID_DESTINO
-
-# Estimativa usando uma taxa nominal de 25 MiB/s.
-./migrate --throughput-mib 25
-
-# Recusa imediatamente, pois a plataforma não oferece transação global.
-./migrate --require-atomic
-
-# Recuperação após interrupção ou falha na recuperação automática.
-./migrate --recover .migrate/AAAAmmddTHHMMSSZ-identificador
+./migrate --plan --source SOURCE_PROJECT_REF --target TARGET_PROJECT_REF
+./migrate --source SOURCE_PROJECT_REF --target TARGET_PROJECT_REF
 ```
 
-## Fluxo
+References are the 20 lowercase letters in a project's Supabase URL, not display names. Credentials can optionally come from `SUPABASE_ACCESS_TOKEN`, `SOURCE_DB_URL`, and `TARGET_DB_URL`. Use hidden prompts or your secret manager to avoid putting credentials in shell history. The CLI receives the token through its environment, not command arguments. The tool does not run `supabase link` or change another directory's project link.
 
-Inventário → estimativa → confirmação → backup do destino → captura da origem → rechecagem de alterações → limpeza de Functions/Storage no destino → limpeza/restauração transacional do banco → configurações → arquivos/owners → Functions → verificação.
+## Commands
 
-A limpeza começa **depois** de verificar os backups. O script não apaga o projeto Supabase, não recria seu ID e não altera a origem. Conexões à origem têm `default_transaction_read_only=on`; o cliente HTTP da origem permite somente GET. Leituras de objetos podem atualizar telemetria de acesso mantida pela plataforma.
+`migrate` is the sole entry point. These options support planning, verification, and recovery of a migration:
 
-Cada captura usa um snapshot PostgreSQL exportado, compartilhado entre dumps e checksums. A origem permanece online e pode receber gravações; **gravações posteriores ao snapshot não entram na migração**. Storage não dispõe de snapshot conjunto com o banco: o script compara inventário/versões depois do download e aborta se detectar alterações. Isso não equivale a CDC, sincronização contínua ou consistência distribuída perfeita.
+```bash
+# Inventory and estimate only; no dumps or remote mutations.
+./migrate --plan
 
-As transações de snapshot são encerradas antes do download de arquivos e bundles, para não manter uma transação PostgreSQL aberta durante toda a transferência. Na restauração, o schema da aplicação é criado primeiro, os dados Auth e de aplicação vêm em seguida e as constraints/triggers são aplicadas depois. Isso preserva referências a `auth.users`.
+# Compare current project states, including database checksums; no remote writes.
+./migrate --diff
 
-A estimativa é uma faixa heurística, não um SLA: considera tamanho do banco, quantidade/tamanho de objetos, funções, backup, restore e verificações, usando 10 MiB/s por padrão. A captura e o cálculo dos checksums consomem I/O da origem. O inventário de metadados fica em memória; arquivos são transferidos em streaming para disco.
+# Estimate using a nominal throughput of 25 MiB/s (default: 10).
+./migrate --throughput-mib 25
 
-## Cobertura e limites
+# Store private artifacts in a directory with permissions 0700.
+./migrate --work-dir /path/to/private/migration-runs
 
-| Recurso | Tratamento |
+# Refuse immediately because global atomicity is unavailable.
+./migrate --require-atomic
+
+# Recover a target from a previous run; prompts for RECOVER <TARGET_PROJECT_REF>.
+./migrate --recover .migrate/YYYYmmddTHHMMSSZ-run-id
+
+./migrate --help
+```
+
+`--plan`, `--diff`, and `--recover` are mutually exclusive. `--diff` reports differences; it does not apply incremental updates or provide continuous replication.
+
+## How migration works
+
+Inventory → estimate → confirmation → target backup → source capture → drift checks → target Functions/Storage cleanup → transactional database restore → configuration → Storage files/owners → Edge Functions → verification.
+
+Cleanup starts only after backups have been checked. Source database connections set `default_transaction_read_only=on`; the source HTTP client only permits GET. Object reads may update platform access telemetry. Neither project is deleted or recreated.
+
+Each database capture uses an exported PostgreSQL snapshot shared by dumps and checksums. The source can remain online, but **writes after the snapshot are not migrated**. Storage has no snapshot shared with PostgreSQL: inventory and object versions are checked again after download, and detected drift aborts the run. This is not CDC or distributed snapshot consistency.
+
+Database snapshot transactions close before file and bundle downloads. Restore creates application schemas first, loads Auth and application data next, and applies constraints/triggers afterwards to preserve references to `auth.users`.
+
+Estimates are heuristic ranges, not an SLA. They account for database size, object count/size, functions, backup, restore, and verification. Checksums read all migratable table rows and consume source I/O. Metadata stays in memory; files stream to disk.
+
+## Coverage and limitations
+
+| Resource | Behavior |
 | --- | --- |
-| Schemas de aplicação, tabelas, dados, índices, views, sequences, tipos, SQL functions, triggers, grants e RLS | Dump/restore nativo, incluindo owners, sem `--no-owner`. Schemas gerenciados não são apagados. |
-| Histórico CLI `supabase_migrations` | Incluído no dump de aplicação. |
-| Auth | Dados das tabelas, incluindo usuários, UUIDs e hashes de senha; schema gerenciado mantido. Versões/tabelas incompatíveis bloqueiam. |
-| Customizações auth/storage | Policies, triggers, ACLs e flags RLS; funções e tabelas customizadas nesses schemas bloqueiam. Privilégios padrão das roles `supabase_*` são preservados e precisam coincidir entre projetos. |
-| Realtime | Publicações da aplicação, associação de tabelas e configuração exposta pela Management API. Publicações internas `supabase_realtime_*` e partições gerenciadas permanecem no destino; `supabase_realtime` é migrada. Conexões/mensagens transitórias não são copiadas. |
-| Storage padrão | Buckets, bytes dos objetos, IDs, `owner`, `owner_id`, timestamps e `user_metadata`; preserva versão física/ETag criados no destino. Valida bytes por SHA-256. |
-| Edge Functions | Download e deploy via CLI, preservando `verify_jwt` e nome. Exige `index.ts` e bundle sem import map declarado. Dependências não recuperáveis bloqueiam antes da limpeza. |
-| Secrets de Edge Functions | Somente nomes no relatório e no final. Valores não são exportados, criados ou apagados. Secrets já existentes no destino permanecem e precisam de revisão. |
-| Auth, SMTP/OAuth, Storage, Realtime e Data API | Copia campos de configuração graváveis definidos no contrato OpenAPI; valor mascarado detectado bloqueia. |
-| Roles customizadas sem LOGIN | Atributos/memberships; incompatibilidade, role privilegiada, role exclusiva do destino ou senha não exportável bloqueiam. |
-| Extensões | Devem existir nos dois projetos com versões iguais. Não se substituem extensões/plataforma implicitamente. |
-| Cron, Vault/pgsodium com dados, Storage vetorial/analítico, upload multipart pendente, SSO/Third-party Auth, subscriptions, FDW, large objects e event triggers customizados | **Bloqueiam**, exigindo adaptadores e homologação específicos. Não são ignorados e a migração não é declarada completa. |
-| Chaves API/JWT, ID/URL de projeto, domínio/DNS, região, plano, compute, rede/SSL, backups/PITR, logs e integrações externas | Identidades/infraestrutura do destino são mantidas. Configuração externa não é clonada. |
+| Application schemas, tables, data, indexes, views, sequences, types, SQL functions, triggers, grants, and RLS | Native dump/restore, including owners. Managed schemas are not dropped. |
+| CLI migration history (`supabase_migrations`) | Included in the application dump. |
+| Auth | Table data, including users, UUIDs, and password hashes; managed schema retained. Incompatible versions or table structures block migration. |
+| Auth/Storage customizations | Policies, triggers, ACLs, and RLS flags. Custom functions/tables in these schemas block migration. Managed role default privileges must match. |
+| Realtime | Application publications, table membership, and configuration exposed by the Management API. `supabase_realtime` migrates; internal `supabase_realtime_*` publications and managed partitions remain on the target. Active connections/messages are not copied. |
+| Standard Storage | Buckets, object bytes, IDs, owners, timestamps, and `user_metadata`. Physical versions/ETags generated on the target are retained. Bytes are verified using SHA-256. |
+| Edge Functions | CLI download/deploy, preserving name and `verify_jwt`. Requires `index.ts` and no declared import map. Unsupported bundles block before cleanup. |
+| Edge Function secrets | Names only in reports. Values are not exported, created, or deleted. Existing target secrets remain and need review. |
+| Auth, SMTP/OAuth, Storage, Realtime, and Data API configuration | Writable fields from the bundled OpenAPI-derived contract. Detected masked values block migration. |
+| Custom roles without LOGIN | Attributes and memberships; incompatible, privileged, target-only, or non-exportable password roles block migration. |
+| Extensions | Must exist in both projects with matching versions. Platform/extensions are not implicitly replaced. |
+| Cron; populated Vault/pgsodium; vector/analytics Storage; pending multipart uploads; SSO/third-party Auth; subscriptions; FDW; large objects; custom event triggers | Block migration and require dedicated adapters and validation. They are not silently skipped. |
+| API/JWT keys, project ID/URL, domains/DNS, region, plan, compute, network/SSL, backups/PITR, platform logs, external integrations | Target identity/infrastructure is retained. External configuration is not cloned. |
 
-Filas/tabelas normais em schemas de aplicação passam pelo dump nativo. Extensões com armazenamento externo, schemas protegidos ou requisitos específicos precisam de homologação própria; não há garantia universal de migração de toda extensão PostgreSQL.
+Ordinary application tables and queues pass through native dump/restore. Extensions with external storage, protected schemas, or special requirements need separate validation; there is no universal extension migration guarantee.
 
-Tokens JWT emitidos pela origem não passam a valer no destino, embora os registros Auth tenham sido copiados. Provedores OAuth precisam aceitar o callback do destino. O script não substitui o ID antigo dentro de SQL, URLs, dados ou código arbitrários: isso pode alterar o significado da aplicação. Revise essas referências antes do cutover.
+Source JWTs do not become valid on the target just because Auth records were copied. OAuth providers must allow the target callback. Project references in arbitrary SQL, URLs, data, and code are not rewritten automatically. Review them before cutover.
 
-A presença de secrets manuais gera o estado `completed_pending_manual_secrets`. Nenhum cliente deve ser direcionado ao destino antes de ajustar secrets/callbacks e homologar a aplicação. Functions que dependem dos secrets podem não funcionar enquanto isso.
+Manual secrets produce the state `completed_pending_manual_secrets`. Functions may not work until secrets are configured. Validate application behavior before directing clients to the target.
 
-## Falhas e recuperação
+## Failure and recovery
 
-A restauração do banco usa `psql --single-transaction -v ON_ERROR_STOP=1`. Uma falha nessa transação não deixa metade do banco importada. Storage/configurações/Functions têm efeitos imediatamente visíveis, portanto o destino deve permanecer isolado durante toda a execução. O script exige a declaração do operador, mas não consegue garantir isolamento global de todos os serviços.
+Database restore uses `psql --single-transaction -v ON_ERROR_STOP=1`: a failed database transaction does not leave a partial database import. Storage, configuration, and Functions have immediately visible effects and do not share that transaction. The target must remain isolated throughout the operation; operator confirmation cannot guarantee isolation across all services.
 
-Depois da primeira mutação, qualquer erro inicia uma tentativa de recuperação do backup do destino. Se ela passar, a execução **continua retornando erro**, com estado `failed_recovered`. Se falhar, o estado será `recovery_failed`; preserve os backups e use `--recover`. Em caso de SIGKILL/queda da máquina, a recuperação é manual pelo mesmo comando. Não há retomada cega de uma fase destrutiva. Secrets não são alterados e não precisam de rollback pelo script.
+After mutation begins, an error triggers an attempt to restore the target backup. Successful recovery still returns an error and records `failed_recovered`. Failed recovery records `recovery_failed`; preserve the backups and use `--recover`. After SIGKILL or a machine failure, recovery is manual. Destructive phases are not blindly resumed. Secret values are never changed by the tool.
 
-Backups, bundles, configurações e relatórios ficam em `.migrate/<execução>/`, ignorada pelo Git e criada com permissões privadas (diretório 0700/arquivos 0600). **Contêm dados pessoais, hashes de senha e possivelmente credenciais de configuração; não são criptografados em repouso pelo programa.** Use disco protegido e uma política de retenção. Não os envie ao GitHub. Hashes detectam corrupção acidental; não substituem autenticação contra alguém que possa reescrever também o manifesto.
+A local lock prevents concurrent runs for the same target in the same work directory. It is not distributed: use one operator per target.
 
-O lock local evita duas execuções no mesmo diretório para o mesmo destino; não é um lock distribuído. Mantenha somente um operador por destino. Relatórios não contêm valores de secrets; erros de subprocessos são sanitizados para não imprimir dados sensíveis.
+## Private artifacts and reports
 
-## Relatório e diff
+Runs are saved under `.migrate/<run>/`, ignored by Git, with private directory/file permissions (0700/0600). **Backups and bundles contain application data, password hashes, and possibly configuration credentials. They are not encrypted at rest by this tool.** Use protected storage and a retention policy. Never upload run directories to an issue or pull request. Hash manifests detect accidental corruption, not an attacker who can also rewrite the manifest.
 
-Ao terminar uma migração, um plano ou um `--diff`, o script grava `final-report.md` e `final-report.json` no diretório privado da execução. Também tenta gerar esses arquivos quando a operação falha após abrir o diretório da execução. O relatório mostra o estado de cada recurso, contagens de tabelas/linhas/usuários/arquivos/owners/funções, nomes dos secrets manuais e quatro comparações:
+Migration, planning, and comparison produce `final-report.md` and `final-report.json`; reports are also attempted after failures once a run directory exists. Reports include per-resource status, counts, manual secret names, and four comparisons:
 
-- Snapshot capturado × destino verificado: evidência da cópia executada.
-- Origem atual × destino atual: diferenças observadas ao final.
-- Snapshot × origem atual: gravações ou alterações posteriores à captura.
-- Destino anterior × destino atual: efeito da operação no destino.
+- Captured snapshot versus verified target: evidence for the completed copy.
+- Current source versus current target: differences observed at the end.
+- Snapshot versus current source: changes after capture.
+- Previous target versus current target: effects of the operation.
 
-As observações têm horários próprios: a origem continua online, portanto igualdade instantânea entre serviços não é garantida. Divergência atual não anula automaticamente uma cópia correta do snapshot. `--plan` não calcula checksums nem conta linhas: registra `data_not_checked`, sem presumir igualdade dos dados. `--diff` lê todas as linhas das tabelas migráveis para calcular fingerprints; pode consumir I/O e deve ser executado em horário adequado à carga da aplicação.
+Observations have separate timestamps. Current differences do not automatically invalidate a verified snapshot copy. `--plan` does not calculate row counts/checksums and reports `data_not_checked`. `--diff` reads all migratable rows; schedule it according to application load.
 
-O diff identifica tabelas e recursos ausentes ou alterados, sem exportar valores de linhas, configurações, SQL, owners ou nomes dos arquivos. Objetos Storage aparecem por identificador opaco derivado do caminho. Os detalhes são limitados a 200 chaves por categoria, com contagens totais e indicação de truncamento. O diff atual de Storage compara metadados; os bytes são verificados por SHA-256 durante a migração. Hashes de bundles Edge são informativos, pois o empacotamento pode conter IDs do projeto; nenhuma Function é invocada automaticamente.
+Comparison details omit row values, configuration values, SQL, owners, and object paths. Storage objects use opaque path-derived identifiers. Details are limited to 200 keys per category, with full counts and truncation indicators. Reports still contain project references, schema/resource names, and secret names; review before sharing.
 
-Se a coleta do diff final falhar, o relatório registra `not_collected` e a execução retorna código 2. Isso **não desfaz** uma migração já concluída. Consulte `migration_phase` e `migration_completed` para distinguir falha de cópia de comparação incompleta. Relatórios finais não incluem valores de secrets; backups e outros arquivos da execução continuam sensíveis e não devem ser compartilhados.
+Current Storage comparison checks metadata only; migration verifies bytes with SHA-256. Edge bundle hashes are informational because bundles may embed project IDs. Functions are never invoked automatically.
 
-`--recover` preserva o relatório da migração e gera outro em `<execução>/recovery-<id>/`. Esse modo observa apenas o destino recuperado, pois não solicita credenciais da origem; execute `--diff` separadamente para comparar ambos.
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Requested operation and final reporting completed. A successful diff can still contain differences; a successful migration may need manual secrets. |
+| `1` | Execution failed or was interrupted, even if automatic recovery succeeded. |
+| `2` | Argument parsing error, or an otherwise completed operation whose final reporting/comparison failed. |
 
-## Validação
+Incomplete comparisons report `not_collected`. A reporting failure does not roll back a completed migration: inspect `migration_phase` and `migration_completed` to distinguish copy failure from incomplete reporting.
+
+Recovery preserves the original report and writes a new one under `<run>/recovery-<id>/`. It observes only the recovered target because it does not request source credentials. Run `./migrate --diff` separately to compare both projects.
+
+## Development and contributing
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -111,6 +148,10 @@ bash -n migrate
 ./migrate --help
 ```
 
-Os testes unitários usam dublês de banco/API para verificar guards, fluxos de falha/recuperação, confirmação, backup corrompido, owners e relatórios sem vazamento de valores. O CI também executa PostgreSQL 17 em bancos descartáveis para testar proteção da origem, snapshot compartilhado, restauração com FK para Auth, RLS, extensão em `public`, preservação do Realtime interno e rollback de falha injetada. Esses testes de integração ficam desabilitados por padrão localmente e nunca recebem credenciais dos projetos reais. Não substituem um teste real de permissões do Supabase, quotas, bundles e OAuth. Veja [homologação](docs/HOMOLOGACAO.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture, tests, and pull request guidance; [VALIDATION.md](docs/VALIDATION.md) for disposable Supabase acceptance testing; and [SECURITY.md](SECURITY.md) for vulnerability reporting and artifact handling. Please follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Contratos consultados: [backup/restore oficial](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore), [Management API](https://supabase.com/docs/reference/api/introduction), [OpenAPI](https://github.com/supabase/supabase/blob/master/apps/docs/spec/api_v1_openapi.json) e ajuda da CLI 2.120.0. A tentativa de consultar `https://supabase.com/changelog.md` ficou indisponível no ambiente de desenvolvimento; os contratos foram conferidos pelas ferramentas de documentação e GitHub.
+Reference contracts: [official backup/restore guide](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore), [Management API](https://supabase.com/docs/reference/api/introduction), and [OpenAPI source](https://github.com/supabase/supabase/blob/master/apps/docs/spec/api_v1_openapi.json). Supabase APIs evolve; the bundled contract is not a guarantee of compatibility with every project or future API version.
+
+## License
+
+[MIT](LICENSE). Contributions are accepted under the same license.

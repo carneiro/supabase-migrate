@@ -51,15 +51,15 @@ def connection_env(url, ref):
     u = urlparse(url)
     query = parse_qs(u.query)
     if u.scheme not in ('postgres', 'postgresql') or not u.password or not u.hostname:
-        raise MigrationError('Informe uma URL PostgreSQL com senha, obtida no painel Connect.')
+        raise MigrationError('Enter a PostgreSQL URL with a password from the Connect panel.')
     host, user = u.hostname, unquote(u.username or '')
     direct = host == f'db.{ref}.supabase.co' and user == 'postgres'
     pooler = (re.fullmatch(r'aws-[0-9]+-[a-z0-9-]+\.pooler\.supabase\.com', host)
               and user == 'postgres.' + ref)
     if not (direct or pooler) or (u.port or 5432) != 5432 or u.path != '/postgres':
-        raise MigrationError('URL não corresponde ao projeto. Use conexão direta ou Session pooler :5432.')
+        raise MigrationError('URL does not match the project. Use a direct connection or Session pooler on port 5432.')
     if set(query) - {'sslmode'} or query.get('sslmode', ['require'])[0] not in ('require', 'verify-full'):
-        raise MigrationError('Parâmetros da URL recusados; TLS é obrigatório.')
+        raise MigrationError('URL parameters rejected; TLS is required.')
     env = {k: v for k, v in os.environ.items() if not k.startswith('PG')}
     env.update(PGHOST=host, PGPORT='5432', PGUSER=user, PGPASSWORD=unquote(u.password),
                PGDATABASE='postgres', PGSSLMODE=query.get('sslmode', ['require'])[0],
@@ -100,14 +100,14 @@ class Database:
             with selectors.DefaultSelector() as selector:
                 selector.register(p.stdout, selectors.EVENT_READ)
                 if not selector.select(30):
-                    raise MigrationError('Timeout ao abrir snapshot PostgreSQL.')
+                    raise MigrationError('Timed out opening a PostgreSQL snapshot.')
             snapshot = p.stdout.readline().decode().strip()
             if not re.fullmatch(r'[0-9A-Fa-f]+-[0-9A-Fa-f]+-[0-9]+', snapshot):
-                raise MigrationError('Não foi possível exportar snapshot PostgreSQL.')
+                raise MigrationError('Could not export a PostgreSQL snapshot.')
             self.snapshot = snapshot
             yield
             if p.poll() is not None:
-                raise MigrationError('Sessão do snapshot foi encerrada durante a captura.')
+                raise MigrationError('Snapshot session ended during capture.')
         finally:
             self.snapshot = None
             if p.poll() is None:
@@ -267,7 +267,7 @@ class Database:
                 count += chunk.count(b'\n')
             p.stdout.close()
             if p.wait():
-                raise MigrationError('Falha ao calcular checksum de tabela.')
+                raise MigrationError('Failed to calculate table checksum.')
             hashes[schema + '.' + name] = h.hexdigest()
             counts[schema + '.' + name] = count
         self.last_row_counts = counts
@@ -275,7 +275,7 @@ class Database:
 
     def restore(self, folder, previous, incoming):
         if self.source:
-            raise MigrationError('Restauração na origem bloqueada.')
+            raise MigrationError('Restoring to the source is blocked.')
         folder = Path(folder)
         cleanup = ['SET LOCAL lock_timeout = \'15s\';', 'SET LOCAL session_replication_role = replica;']
         for p in previous['policies']:
@@ -334,11 +334,11 @@ def role_statements(incoming, previous):
         if not custom_role(r['name']):
             continue
         if r['rolsuper'] or r['rolreplication'] or r['rolcreaterole']:
-            raise MigrationError('Role privilegiada não migrável automaticamente: ' + r['name'])
+            raise MigrationError('Privileged role cannot be migrated automatically: ' + r['name'])
         # Avoid changing passwords/attributes of pre-existing roles.
         if r['name'] in existing:
             if r != existing[r['name']]:
-                raise MigrationError('Role existente com atributos diferentes: ' + r['name'])
+                raise MigrationError('Existing role has different attributes: ' + r['name'])
             continue
         attrs = ['LOGIN' if r['rolcanlogin'] else 'NOLOGIN',
                  'INHERIT' if r['rolinherit'] else 'NOINHERIT',
